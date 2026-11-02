@@ -1,0 +1,52 @@
+
+        ==========     _____ _    _ ____  _____  ______          _____  
+        =====         / ____| |  | |  _ \|  __ \|  ____|   /\   |  __ \ 
+          =====      | (___ | |  | | |_) | |__) | |__     /  \  | |  | |
+            ====      \___ \| |  | |  _ <|  _  /|  __|   / /\ \ | |  | |
+              ====    ____) | |__| | |_) | | \ \| |____ / ____ \| |__| |
+        ==========   |_____/ \____/|____/|_|  \_\______/_/    \_\_____/
+	  v2.0.6
+
+//========================== featureCounts setting ===========================\\
+||                                                                            ||
+||             Input files : 1 BAM file                                       ||
+||                                                                            ||
+||                           1BU-b_Aligned.sortedByCoord.out.bam              ||
+||                                                                            ||
+||             Output file : 1BU-b_fc.txt                                     ||
+||                 Summary : 1BU-b_fc.txt.summary                             ||
+||              Paired-end : yes                                              ||
+||        Count read pairs : yes                                              ||
+||              Annotation : Acanthamoeba_castellanii_C3_gffread.gtf (GTF)    ||
+||      Dir for temp files : /home/lendle93/P_2024_ACRS_AcanthamoebaRNASe ... ||
+||                                                                            ||
+||                 Threads : 5                                                ||
+||                   Level : meta-feature level                               ||
+||      Multimapping reads : not counted                                      ||
+|| Multi-overlapping reads : not counted                                      ||
+||   Min overlapping bases : 10                                               ||
+||                                                                            ||
+\\============================================================================//
+
+//================================= Running ==================================\\
+||                                                                            ||
+|| Load annotation file Acanthamoeba_castellanii_C3_gffread.gtf ...           ||
+||    Features : 126558                                                       ||
+||    Meta-features : 14875                                                   ||
+||    Chromosomes/contigs : 175                                               ||
+||                                                                            ||
+|| Process BAM file 1BU-b_Aligned.sortedByCoord.out.bam...                    ||
+||    Strand specific : reversely stranded                                    ||
+||    Paired-end reads are included.                                          ||
+||    Total alignments : 37150241                                             ||
+||    Successfully assigned alignments : 30277231 (81.5%)                     ||
+||    Running time : 0.33 minutes                                             ||
+||                                                                            ||
+|| Write the final count table.                                               ||
+|| Write the read assignment summary.                                         ||
+||                                                                            ||
+|| Summary of counting results can be found in file "/home/lendle93/P_2024_A  ||
+|| CRS_AcanthamoebaRNASeq_LE/FeatureCounts/1BU-b_fc.txt.summary"              ||
+||                                                                            ||
+\\============================================================================//
+

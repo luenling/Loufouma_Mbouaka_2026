@@ -1,0 +1,22 @@
+INFO	2024-06-03 21:59:29	CollectRnaSeqMetrics	
+
+********** NOTE: Picard's command line syntax is changing.
+**********
+********** For more information, please see:
+********** 
+https://github.com/broadinstitute/picard/wiki/Command-Line-Syntax-Transition-For-Users-(Pre-Transition)
+**********
+********** The command line looks like this in the new syntax:
+**********
+**********    CollectRnaSeqMetrics -I /home/lendle93/P_2024_ACRS_AcanthamoebaRNASeq_LE/STARMap_main/1BU-b_Aligned.sortedByCoord.out.bam -O /home/lendle93/P_2024_ACRS_AcanthamoebaRNASeq_LE/LOGS/1BU-b__rnaseq_picard.out -CHART /home/lendle93/P_2024_ACRS_AcanthamoebaRNASeq_LE/LOGS/1BU-b__rnaseq_picard.pdf -REF_FLAT /shared_data/shared_data_BACKUP/experimental_data/P_2024_ACRS_AcanthamoebaRNASeq_LE/References//Acastellanii_C3/Acanthamoeba_castellanii_C3.ref_flat -STRAND NONE -RIBOSOMAL_INTERVALS /shared_data/shared_data_BACKUP/experimental_data/P_2024_ACRS_AcanthamoebaRNASeq_LE/References//Acastellanii_C3/Acanthamoeba_castellanii_C3_rRNA.interval_list -VALIDATION_STRINGENCY LENIENT -VERBOSITY WARNING
+**********
+
+
+INFO	2024-06-03 21:59:29	RExecutor	Executing R script via command: Rscript /tmp/lendle93/script7867237100364182757.R
+INFO	2024-06-03 21:59:30	ProcessExecutor	[1] "Checking if R is installed"
+Jun 03, 2024 9:59:30 PM com.intel.gkl.NativeLibraryLoader load
+INFO: Loading libgkl_compression.so from jar:file:/home/lendle93/Tools/picard.jar!/com/intel/gkl/native/libgkl_compression.so
+[Mon Jun 03 21:59:30 CEST 2024] CollectRnaSeqMetrics REF_FLAT=/shared_data/shared_data_BACKUP/experimental_data/P_2024_ACRS_AcanthamoebaRNASeq_LE/References/Acastellanii_C3/Acanthamoeba_castellanii_C3.ref_flat RIBOSOMAL_INTERVALS=/shared_data/shared_data_BACKUP/experimental_data/P_2024_ACRS_AcanthamoebaRNASeq_LE/References/Acastellanii_C3/Acanthamoeba_castellanii_C3_rRNA.interval_list STRAND_SPECIFICITY=NONE CHART_OUTPUT=/home/lendle93/P_2024_ACRS_AcanthamoebaRNASeq_LE/LOGS/1BU-b__rnaseq_picard.pdf INPUT=/home/lendle93/P_2024_ACRS_AcanthamoebaRNASeq_LE/STARMap_main/1BU-b_Aligned.sortedByCoord.out.bam OUTPUT=/home/lendle93/P_2024_ACRS_AcanthamoebaRNASeq_LE/LOGS/1BU-b__rnaseq_picard.out VERBOSITY=WARNING VALIDATION_STRINGENCY=LENIENT    MINIMUM_LENGTH=500 RRNA_FRAGMENT_PERCENTAGE=0.8 METRIC_ACCUMULATION_LEVEL=[ALL_READS] END_BIAS_BASES=100 ASSUME_SORTED=true STOP_AFTER=0 QUIET=false COMPRESSION_LEVEL=5 MAX_RECORDS_IN_RAM=500000 CREATE_INDEX=false CREATE_MD5_FILE=false USE_JDK_DEFLATER=false USE_JDK_INFLATER=false
+[Mon Jun 03 21:59:30 CEST 2024] Executing as lendle93@sissi on Linux 5.10.0-26-amd64 amd64; OpenJDK 64-Bit Server VM 17.0.11+9-Debian-1deb11u1; Deflater: Intel; Inflater: Intel; Provider GCS is available; Picard version: 3.1.1
+[Mon Jun 03 22:04:53 CEST 2024] picard.analysis.CollectRnaSeqMetrics done. Elapsed time: 5.39 minutes.
+Runtime.totalMemory()=2155872256

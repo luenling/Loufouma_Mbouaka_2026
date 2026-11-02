@@ -1,0 +1,626 @@
+---
+title: "compare RNAseq Proteomics"
+author: "Lukas Endler"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../Results/") })
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,cache.comments=FALSE,autodep=TRUE)
+cache_most=TRUE
+cache_special=TRUE
+ERANAL = FALSE
+image.saving = FALSE
+```
+
+
+```{r libraries_helpers , results='hide', message=FALSE, warning=FALSE}
+library(ggupset)
+library(ComplexUpset)
+library(patchwork)
+library(openxlsx)
+library(readr)
+library(tidyverse)
+#library(GSEABase)
+cmd_args <- commandArgs(trailingOnly = FALSE)
+file_arg <- grep("^--file=", cmd_args, value = TRUE)
+# if Rstudio set base dir to one level down from script path 
+if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    file_dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+    } else if (length(file_arg)) {
+    file_dir <- dirname(sub("^--file=", "", file_arg))
+    } else {
+  file_dir <- getwd()
+}
+base_dir <- normalizePath(file.path(file_dir, "/../"))
+res_dir <- file.path(base_dir, "/Results/")
+script_dir <- file.path(base_dir, "/p_2024_acrs_scripts/")
+load(paste0(res_dir,"/ac_de.RData"))
+
+source(file.path(script_dir, "/rnaseq_funcs.R"))
+knitr::opts_knit$set(root.dir = res_dir)
+```
+
+## Load in the data
+
+```{r}
+setwd("~/Data/P_2024_ACRS_AcanthamoebaRNASeq_LE/")
+rna_data <- openxlsx::read.xlsx("Results/DE_results/DE_genes.xlsx", sheet = "hcec_ctrl")
+prot_data <- openxlsx::read.xlsx("Proteomics/261006_package/TMT_Run1_SN20PDnormAcaOnly/261006_limmaResult_IP_TMa_017_TMT_Run1_P_SN20PDnormAcaOnly.xlsx", sheet = "limma result") %>% 
+  filter(! str_detect(Description, "Homo sapiens")) %>% mutate(FDR_P = BUco_P_vs_BU_P_FDR, 
+                                                               logFC_P = BUco_P_vs_BU_P_LOG2FC)
+#prot_data <- openxlsx::read.xlsx("241018_limmaResult_IP_TMa_017_TMT_Run1_P_SN20.xlsx", sheet = "limma result") %>% filter(! str_detect(Description, "Homo sapiens"))
+secr_data <- openxlsx::read.xlsx("Proteomics/261006_package/TMT_Run1_SN20PDnormAcaOnly/261006_limmaResult_IP_TMa_017_TMT_Run1_S_SN20PDnormAcaOnly.xlsx", sheet = "limma result") %>% 
+  filter(! str_detect(Description, "Homo sapiens")) %>% 
+  mutate(FDR_S = BUco_S_vs_BU_S_FDR,
+         logFC_S = BUco_S_vs_BU_S_LOG2FC)
+
+
+```
+
+
+```{r}
+secr_data <- secr_data %>% mutate( regulation = sign(logFC_S) * as.numeric(FDR_S <= 0.05))
+prot_data <- prot_data %>% mutate( regulation = sign(logFC_P) * as.numeric(FDR_P <= 0.05))
+table(secr_data$regulation)
+table(prot_data$regulation)
+```
+
+
+Get the uniprot ids of all proteins
+
+```{r, eval=FALSE}
+all_uniprots <- unique(c(prot_data$Accession, secr_data$Accession))
+write(all_uniprots, file = file.path(base_dir, "References/all_uniprot_proteins.txt"))
+length(all_uniprots)
+```
+Get the blast results for the matching of the uniprot and C3 proteins
+
+```{r}
+c3_up <- read_tsv(file.path(base_dir, "rbh_blast/c3_vs_uniprot.tsv"), 
+                   col_names = c("query", "subject", "pident",
+                                 "length", "qlen", "slen", "evalue", "bitscore")) %>%
+  mutate(qcov = length / qlen, scov = length / slen)
+up_c3 <- read_tsv(file.path(base_dir, "rbh_blast/uniprot_vs_c3.tsv"), 
+                   col_names = c("query", "subject", "pident",
+                                 "length", "qlen", "slen", "evalue", "bitscore")) %>%
+  mutate(qcov = length / qlen, scov = length / slen)
+```
+
+Rank each list of results by bitscore, evalue and qcov, and only take top hit, inner join only idnetical pairs:
+
+```{r}
+best_c3_up <- c3_up %>% group_by(query) %>% filter(pident > 40 & qcov > 0.25) %>%
+  arrange(desc(bitscore), evalue, desc(qcov), desc(scov)) %>%
+  slice_head(n=1)  %>% dplyr::rename(uniprot = subject, c3 = query)
+best_up_c3 <- up_c3 %>% group_by(query) %>% filter(pident > 40 & qcov > 0.25) %>% 
+  arrange(desc(bitscore), evalue, desc(qcov), desc(scov)) %>%
+  slice_head(n=1) %>% dplyr::rename(uniprot = query, c3 = subject)
+# get reciprocal best hits
+rbh_c3_up <- best_c3_up %>% inner_join(best_up_c3, by= c("uniprot", "c3"))
+rbh_c3_up <- rbh_c3_up %>% mutate(c3 = str_replace(c3, "-T.*$", ""), 
+                                  uniprot = str_replace(uniprot, "^.*\\|(.*)\\|.*$", "\\1"))
+cat("RBH:", nrow(rbh_c3_up), "Percent of proteome:", round(100* nrow(rbh_c3_up)/length(all_uniprots)))
+```
+
+Map protein IDs to C3 gene IDs
+
+```{r}
+prot_map <- prot_ids %>% 
+  left_join(rbh_c3_up %>% select(uniprot, c3), by = join_by(Accession == uniprot)) %>%
+  dplyr::rename(GeneID = c3)
+```
+
+```{r}
+# add FUN id to prots and sec
+# only use the rbh mapping, the ACA IDs do not work as well, as there are multiple entries for a lot of genes
+prot_data_p <- prot_data %>% left_join(prot_map %>% select(Accession, GeneID)) %>% 
+  mutate(GeneID = if_else(is.na(GeneID), Accession, GeneID)) %>% 
+  left_join(rna_data %>% select(GeneID, Name)) %>%
+  mutate(Name = if_else(is.na(Name), Gene, Name)) %>% 
+  mutate(Name = if_else(is.na(Name), Accession, Name))
+secr_data_p <- secr_data %>% left_join(prot_map %>% select(Accession, GeneID)) %>% 
+  mutate(GeneID = if_else(is.na(GeneID), Accession, GeneID)) %>% 
+  left_join(rna_data %>% select(GeneID, Name)) %>%
+  mutate(Name = if_else(is.na(Name), Gene, Name)) %>% 
+  mutate(Name = if_else(is.na(Name), Accession, Name))
+```
+
+
+```{r}
+comb_data <- rna_data %>% select(GeneID, logFC, FDR, Name, Aca_neff_ID, Description) %>% 
+  full_join(prot_data_p %>% select(GeneID, Gene, Accession, logFC_P, FDR_P, Description), by = "GeneID") %>% 
+  full_join(secr_data_p %>% select(GeneID, Gene, logFC_S,FDR_S, Accession, Description), by = "GeneID")
+conflicts_prefer(dplyr::rename)
+comb_data_excel <- comb_data %>% mutate(
+  Accession.x = if_else(is.na(Accession.x), 
+                        Accession.y, Accession.x),
+  Description = if_else(! is.na(Description.x),
+                        Description.x,
+                        if_else( ! is.na(Description.y), Description.y, Description),
+                        Description),
+  Gene.x = if_else(is.na(Gene.x), Gene.y, Gene.x)) %>% 
+  rename(PDB_ID = Accession.x, GeneID_prot = Gene.x, 
+         logFC_RNA = logFC, FDR_RNA = FDR, 
+         ) %>% 
+  select( -c(Accession.y, Description.x, Description.y, Gene.y)) %>%
+  relocate(GeneID, PDB_ID, Name, Aca_neff_ID, GeneID_prot, Description )
+
+# up down and incons for logFC
+test_consist <- function(values){
+  apply(values, 1, function(x) if(length(x[complete.cases(x)]) < 1) {NA} 
+               else if(all(x[complete.cases(x)] > 0)){"up"}
+               else if(all(x[complete.cases(x)] < 0)){"down"} 
+               else{"incons"})
+}
+comb_data <- comb_data %>% 
+  mutate(direction = test_consist(
+    cbind(logFC, logFC_P, logFC_S))
+    )
+```
+
+Write excel table
+
+```{r}
+comb_data_excel <- comb_data_excel %>% 
+  mutate(dir_overall = test_consist(
+    cbind(logFC_RNA, logFC_P, logFC_S)),
+    dir_RNA_Prot = test_consist(
+      cbind(logFC_RNA, logFC_P)),
+    dir_RNA_Secr = test_consist(
+      cbind(logFC_RNA, logFC_S)),
+    dir_Prot_Secr = test_consist(
+      cbind(logFC_P, logFC_S)),
+  )
+
+wb <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb, sheetName = "comp")
+openxlsx::writeDataTable(wb, x = comb_data_excel, sheet = 1)
+openxlsx::saveWorkbook(wb, file = file.path(base_dir,"comparison_RNAseq_proteome_secretome.xlsx"), 
+                       overwrite = TRUE)
+```
+
+
+
+## Volcano plots
+
+
+```{r}
+outdir = file.path(res_dir,"graphics/")
+ppv1 <- volcano.plot.cust(prot_data_p, adjP="FDR_P", lgfc = "logFC_P", maxoverlaps = 50) + 
+  theme(panel.grid.major = element_blank(),
+                            panel.grid.minor = element_blank(), 
+                            legend.position = "none")
+psv1 <- volcano.plot.cust(secr_data_p, adjP="FDR_S", lgfc = "logFC_S", maxoverlaps = 50) + 
+  theme(panel.grid.major = element_blank(),
+                            panel.grid.minor = element_blank(), 
+                            legend.position = "none")
+plot(ppv1)
+plot(psv1)
+ggsave( paste0(outdir,"/",i,"_volcano_proteome.png"), ppv1, width = 8, height = 7)
+ggsave( paste0(outdir,"/",i,"_volcano_proteome.tiff"), ppv1, width = 8, height = 7, dpi=300, 
+        compression = 'lzw')
+ggsave( paste0(outdir,"/",i,"_volcano_secretome.png"), psv1, width = 8, height = 7)
+ggsave( paste0(outdir,"/",i,"_volcano_secretoe.tiff"), psv1, width = 8, height = 7, dpi=300, 
+        compression = 'lzw')
+
+```
+
+
+## Correlation plots
+
+plot rna_seq lgfc against proteome
+
+Get correlation coefficients:
+
+```{r}
+pearson_cor_prot_sig <- comb_data %>% filter(! (is.na(FDR) | is.na(FDR_P))) %>%
+  filter(FDR <= 0.05 | FDR_P <= 0.05) %>% 
+  summarize(cor = cor(logFC, logFC_P,method = "pearson", use="complete.obs")) %>% 
+  pull(cor)
+spearman_cor_prot_sig <- comb_data %>% filter(! (is.na(FDR) | is.na(FDR_P))) %>%
+  filter(FDR <= 0.05| FDR_P <= 0.05) %>% 
+  summarize(cor = cor(logFC, logFC_P,method = "spearman", use="complete.obs")) %>%
+  pull(cor)
+label_prot_sig <- paste0("Pearson r = ", round(pearson_cor_prot, 2), 
+                "\nSpearman ρ = ", round(spearman_cor_prot, 2))
+
+pearson_cor_sec_sig <- comb_data %>% filter(! (is.na(FDR) | is.na(FDR_S))) %>% 
+  filter(FDR <= 0.05| FDR_S <= 0.05) %>% 
+  summarize(cor = cor(logFC, logFC_S,method = "pearson", use="complete.obs")) %>% 
+  pull(cor)
+spearman_cor_sec_sig <- comb_data %>% filter(! (is.na(FDR) | is.na(FDR_S))) %>%
+  filter(FDR <= 0.05| FDR_S <= 0.05) %>% 
+  summarize(cor = cor(logFC, logFC_S,method = "spearman", use="complete.obs")) %>% 
+  pull(cor)
+label_sec_sig <- paste0("Pearson r = ", round(pearson_cor_sec, 2), 
+                     "\nSpearman ρ = ", round(spearman_cor_sec, 2))
+```
+
+```{r}
+cp1_sig <- ggplot(comb_data %>% filter(! (is.na(FDR) | is.na(FDR_S))) %>%
+                    filter(FDR <= 0.05| FDR_P <= 0.05) %>%
+                mutate(direction = test_consist(cbind(logFC, logFC_P))), 
+              aes(x = logFC, y = logFC_P, label = Name, color = direction)) +
+  geom_point(size = 0.5) + 
+  ggrepel::geom_text_repel(size = 2,max.overlaps = 50, force_pull = 5) + 
+  ylab("proteome log2 FC") + xlab("transcriptome log2 FC") +  
+  #labs(title = "proteome vs RNAseq log2 FC") + theme_bw() + 
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + 
+  scale_color_manual(values=c(
+    'down'='blue', 'incons'='gray',
+    'up'='red')) + theme_bw() + theme(legend.position = "none") + 
+  #geom_smooth(method = "lm", se = FALSE, color = "grey", linetype = 2) + 
+  annotate("text", x = Inf, y=Inf, label=label_prot_sig, hjust=1.1, vjust = 1.5, size = 3)
+plot(cp1_sig)
+ggsave(file.path(base_dir, "comp_rnaseq_proteomics_sig_scatter.tiff"), cp1_sig, width = 5, height= 5, 
+       dpi=300, compression = 'lzw')
+
+cp2_sig <- ggplot(comb_data %>% filter(! (is.na(FDR) | is.na(FDR_S))) %>%
+                    filter( FDR <= 0.05| FDR_S <= 0.05) %>%
+                mutate(direction = test_consist(cbind(logFC, logFC_S))), 
+              aes(x = logFC, y = logFC_S, label = Name,  color = direction)) +
+  geom_point(size = 0.5) + 
+  ggrepel::geom_text_repel(size = 2,max.overlaps = 50, force_pull = 5) + 
+  ylab("secretome log2 FC") + xlab("transcriptome log2 FC") +  
+  #labs(title = "proteome vs RNAseq log2 FC") + theme_bw() + 
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + 
+  scale_color_manual(values=c(
+    'down'='blue', 'incons'='gray',
+    'up'='red')) + theme_bw() + theme(legend.position = "none") +
+  annotate("text", x = Inf, y=Inf, label=label_sec_sig, hjust=1.1, vjust = 1.5, size = 3)
+ggsave(file.path(base_dir, "comp_rnaseq_secretome_sig_scatter.tiff"), cp2_sig, width = 5, height= 5, 
+       dpi=300, compression = 'lzw')
+plot(cp2_sig)
+```
+
+
+```{r}
+pearson_cor_prot <- comb_data %>% filter(! (is.na(FDR) | is.na(FDR_P))) %>%
+  summarize(cor = cor(logFC, logFC_P,method = "pearson", use="complete.obs")) %>% 
+  pull(cor)
+spearman_cor_prot <- comb_data %>% filter(! (is.na(FDR) | is.na(FDR_P))) %>%
+  summarize(cor = cor(logFC, logFC_P,method = "spearman", use="complete.obs")) %>%
+  pull(cor)
+label_prot <- paste0("Pearson r = ", round(pearson_cor_prot, 2), 
+                     "\nSpearman ρ = ", round(spearman_cor_prot, 2))
+
+pearson_cor_ps <- comb_data %>% filter(! (is.na(FDR_S) | is.na(FDR_P))) %>%
+  summarize(cor = cor(logFC_S, logFC_P,method = "pearson", use="complete.obs")) %>% 
+  pull(cor)
+spearman_cor_ps <- comb_data %>% filter(! (is.na(FDR_S) | is.na(FDR_P))) %>%
+  summarize(cor = cor(logFC_S, logFC_P,method = "spearman", use="complete.obs")) %>%
+  pull(cor)
+label_prot_ps <- paste0("Pearson r = ", round(pearson_cor_ps, 2), 
+                     "\nSpearman ρ = ", round(spearman_cor_ps, 2))
+
+
+pearson_cor_sec <- comb_data %>% filter(! (is.na(FDR) | is.na(FDR_S))) %>% 
+  summarize(cor = cor(logFC, logFC_S,method = "pearson", use="complete.obs")) %>% 
+  pull(cor)
+spearman_cor_sec <- comb_data %>% filter(! (is.na(FDR) | is.na(FDR_S))) %>%
+  summarize(cor = cor(logFC, logFC_S,method = "spearman", use="complete.obs")) %>% 
+  pull(cor)
+label_sec <- paste0("Pearson r = ", round(pearson_cor_sec, 2), 
+                    "\nSpearman ρ = ", round(spearman_cor_sec, 2))
+```
+
+```{r}
+cp1 <- ggplot(comb_data %>% filter(! (is.na(FDR) | is.na(FDR_P))) %>%
+                mutate(direction = test_consist(cbind(logFC, logFC_P))), 
+              aes(x = logFC, y = logFC_P, label = Name, color = direction)) +
+  geom_point(size = 0.5) + 
+  ggrepel::geom_text_repel(size = 2,max.overlaps = 50, force_pull = 5) + 
+  ylab("proteome log2 FC") + xlab("transcriptome log2 FC") +  
+  #labs(title = "proteome vs RNAseq log2 FC") + theme_bw() + 
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + 
+  scale_color_manual(values=c(
+    'down'='blue', 'incons'='gray',
+    'up'='red')) + theme_bw() + theme(legend.position = "none") + 
+  #geom_smooth(method = "lm", se = FALSE, color = "grey", linetype = 2) + 
+  annotate("text", x = Inf, y=Inf, label=label_prot, hjust=1.1, vjust = 1.5, size = 3)
+ggsave(file.path(base_dir, "comp_rnaseq_proteomics_scatter.tiff"), cp1, width = 5, height= 5, 
+       dpi=300, compression = 'lzw')
+cp2 <- ggplot(comb_data %>% filter(! (is.na(FDR) | is.na(FDR_S))) %>%
+                mutate(direction = test_consist(cbind(logFC, logFC_S))), 
+              aes(x = logFC, y = logFC_S, label = Name,  color = direction)) +
+  geom_point(size = 0.5) + 
+  ggrepel::geom_text_repel(size = 2,max.overlaps = 50, force_pull = 5) + 
+  ylab("secretome log2 FC") + xlab("transcriptome log2 FC") +  
+  #labs(title = "proteome vs RNAseq log2 FC") + theme_bw() + 
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + 
+  scale_color_manual(values=c(
+    'down'='blue', 'incons'='gray',
+    'up'='red')) + theme_bw() + theme(legend.position = "none") +
+  annotate("text", x = Inf, y=Inf, label=label_sec, hjust=1.1, vjust = 1.5, size = 3)
+ggsave(file.path(base_dir, "comp_rnaseq_secretome_scatter.tiff"), 
+       cp2, width = 5, height= 5, 
+       dpi=300, compression = 'lzw')
+plot(cp1)
+plot(cp2)
+```
+
+
+```{r}
+cps1 <- ggplot(comb_data %>% filter(! is.na(logFC_S)) %>% filter(! is.na(logFC_P)) %>%
+                mutate(direction = test_consist(cbind(logFC_S, logFC_P))), 
+              aes(x = logFC_S, y = logFC_P, label = Name, color = direction)) +
+  geom_point(size = 0.5) + 
+  ggrepel::geom_text_repel(size = 2,max.overlaps = 50, force_pull = 5) + 
+  ylab("proteome log2 FC") + xlab("secretome log2 FC") +  
+  #labs(title = "proteome vs RNAseq log2 FC") + theme_bw() + 
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + 
+  scale_color_manual(values=c(
+    'down'='blue', 'incons'='gray',
+    'up'='red')) + theme_bw() + theme(legend.position = "none") + 
+  #geom_smooth(method = "lm", se = FALSE, color = "grey", linetype = 2) + 
+  annotate("text", x = Inf, y=Inf, label=label_prot_ps, hjust=1.1, vjust = 1.5, size = 3)
+ ggsave(file.path(base_dir, "comp_rnaseq_proteome_secretome_scatter.tiff"), cps1, width = 5, height= 5, 
+        dpi=300, compression = 'lzw')
+plot(cps1)
+```
+
+
+## Upsetplots
+
+```{r}
+comb_data <- comb_data %>% mutate(RNAseq = ! is.na(FDR),
+                                  Prot = ! is.na(FDR_P),
+                                  Secr = ! is.na(FDR_S))
+cat_cols <- c("RNAseq", "Prot", "Secr")
+library(patchwork)
+up1 <- upset(comb_data, cat_cols, name = "", width_ratio=0.2, 
+            wrap = F, stripes = NA,
+            set_sizes=( upset_set_size() + 
+                          scale_y_reverse(breaks=c(0,5000, 10000))),
+            themes = upset_modify_themes(
+              list(
+                "intersections_matrix" = theme(text = element_text(size=12), 
+                                               panel.grid.major = element_blank(), 
+                                               panel.grid.minor = element_blank(),
+                                               axis.title.x = element_blank()),
+                "overall_sizes" = theme(axis.text.y = element_blank(), 
+                                        panel.grid.major = element_blank(), 
+                                        panel.grid.minor = element_blank(),
+                                        axis.ticks.x = element_line(),
+                                        axis.title.x = element_blank()
+                )
+              ))
+) 
+
+uc1 <- upset(comb_data, cat_cols, name = "", width_ratio=0.2, 
+      wrap = F, stripes = NA,
+      set_sizes=(upset_set_size() + 
+                    scale_y_reverse(breaks=c(0,5000, 10000))),
+      base_annotations=list(
+        'Intersection size'=intersection_size(
+          mapping = aes(fill=direction)) + 
+            scale_fill_manual(values=c(
+            'down'='blue', 'incons'='lightgray',
+            'up'='red'))
+          ),
+      themes = upset_modify_themes(
+        list(
+          "intersections_matrix" = theme(text = element_text(size=12), 
+                                         panel.grid.major = element_blank(), 
+                                         panel.grid.minor = element_blank(),
+                                         axis.title.x = element_blank(),
+                                         legend.position = "none"),
+          "overall_sizes" = theme(axis.text.y = element_blank(), 
+                                  panel.grid.major = element_blank(), 
+                                  panel.grid.minor = element_blank(),
+                                  axis.ticks.x = element_line(),
+                                  axis.title.x = element_blank(),
+                                  legend.position = "none"
+                                  ),
+          "Intersection size" = theme(panel.grid.major = element_blank(), 
+                                      panel.grid.minor = element_blank(),
+                                      legend.position = "none")
+          )
+        ))
+
+plot(uc1)
+```
+
+
+```{r}
+ggsave(file.path(base_dir, "comp_rnaseq_proteomics_upset.pdf"), up1, 
+       width = 7, height= 4)
+ggsave(file.path(base_dir, "comp_rnaseq_proteomics_color_upset.pdf"), uc1, 
+       width = 7, height= 4)
+ggsave(file.path(base_dir, "comp_rnaseq_proteomics_upset.tiff"), up1, 
+       width = 7, height= 4,dpi=300, compression = 'lzw')
+ggsave(file.path(base_dir, "comp_rnaseq_proteomics_color_upset.tiff"), uc1, 
+       width = 7, height= 4, dpi=300, compression = 'lzw')
+```
+
+
+## Proteome and Secretome GO
+
+
+
+```{r}
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+uniprot_annos <- read_tsv(file.path(base_dir, "Proteomics/proteome_idmapping_2026_10_21.tsv.gz"))
+prots <- data.frame(accession = all_uniprots) %>% left_join(uniprot_annos, by=join_by(accession == From))
+go_terms_up <- prots %>% filter(! is.na(`Gene Ontology IDs`)) %>% pull(`Gene Ontology IDs`) %>% str_split("; ") %>% unlist() %>% unique()
+go_gmt_up <- lapply(go_terms_up, function(x) prots %>% filter( grepl(x,`Gene Ontology IDs`, fixed = TRUE)) %>% pull(accession) )
+names(go_gmt_up) <- go_terms_up
+go_terms_num_up <- sapply(go_gmt_up, length)
+# only keep GO terms with at least 10 genes
+go_terms_num_up <- go_terms_num_up[go_terms_num_up >= 10]
+go_gmt_up <- go_gmt_up[names(go_terms_num_up)]
+go_names_up <- unlist(lapply(names(go_terms_num_up), 
+                          function (x) {
+                            y <- AnnotationDbi::Term(x); 
+                            if(is.na(y)) { y <- setNames(NA,x)} 
+                            return(y)}))
+go_ontology_up <- unlist(lapply(names(go_terms_num_up), AnnotationDbi::Ontology))
+# do not need to remove ":" in GO terms
+go_gmt_onts_up <- list()
+for (onto in c("MF", "BP", "CC")){
+  go_gmt_onts_up[[onto]] <- go_gmt_up[ names(go_ontology_up[go_ontology_up == onto])] 
+  #names(go_gmt_onts[[onto]]) <- gsub(":","", names(go_gmt_onts[[onto]]))
+}
+#go_names[names(go_terms_num[go_terms_num < 5])]
+```
+
+
+
+```{r}
+library(fgsea)
+prot_stat <- setNames(-log10(prot_data$BUco_P_vs_BU_P_PVALUE) * sign(prot_data$logFC_P), prot_data$Accession)
+secr_stat <- setNames(-log10(secr_data$BUco_S_vs_BU_S_PVALUE) * sign(secr_data$logFC_S), secr_data$Accession)
+prot_go_fgsea <- list()
+secr_go_fgsea <- list()
+for (onto in c("MF", "BP", "CC")){
+  prot_go_fgsea[[onto]] <- fgsea(pathways = lapply(go_gmt_onts_up[[onto]],
+                                                  function(x) base::intersect(x, prot_data$Accession)),
+                                stats = sort(prot_stat, decreasing = TRUE), minSize = 15, maxSize=500) %>% 
+    mutate(go_name = go_names_up[pathway], go_ont = go_ontology_up[pathway]) %>%
+    arrange(padj) %>%
+    relocate(all_of(c("go_name", "go_ont")), .after= pathway)
+  secr_go_fgsea[[onto]] <- fgsea(pathways = lapply(go_gmt_onts_up[[onto]],
+                                                  function(x) base::intersect(x, secr_data$Accession)),
+                                stats = sort(secr_stat, decreasing = TRUE), minSize = 15, maxSize=500) %>% 
+    mutate(go_name = go_names_up[pathway], go_ont = go_ontology_up[pathway]) %>%
+    arrange(padj) %>%
+    relocate(all_of(c("go_name", "go_ont")), .after= pathway)
+}
+```
+
+```{r}
+for (ont in c("BP", "CC", "MF")){
+  pp1 <- ggplot(prot_go_fgsea[[ont]] %>% arrange(padj) %>% slice_head(n = 15) %>%
+                 mutate(go_name = factor(go_name, levels = go_name), reg = if_else(NES > 0, "up", "down")), 
+               aes(y=sign(NES)*-log10(padj), x = go_name, size = size, color = NES > 0)) +  
+    geom_point(stat="identity") + scale_size_continuous(breaks = c(25, 100, 250)) + 
+    scale_color_discrete(guide = "none", palette = c("blue", "red")) +  
+    geom_hline(yintercept = 0, linetype = "dotted", color = "lightgrey") +
+    labs(x = "", y=expression(-log["10"](P[adj])%*%sign(NES)), 
+         size = " # genes",
+         title = paste("GO", ont)) +
+    geom_hline(yintercept = c(-log10(0.05),log10(0.05)), color = "darkgrey", linetype = "dashed")+
+    coord_flip() + facet_grid( reg ~ . , scales="free_y", space = "free_y") + theme_bw() +
+    theme(strip.background = element_blank(), strip.text.x = element_blank()) 
+  print(pp1)
+  ggsave(file.path(res_dir, paste0("GO_",ont , "enrichment_bubble_proteome.tiff")), pp1, width = 8, height= 6,
+         dpi=300, compression = 'lzw')
+ 
+  
+}
+```
+```{r}
+ for (ont in c("BP", "CC", "MF")){
+ps1 <- ggplot(secr_go_fgsea[[ont]] %>% arrange(padj) %>% slice_head(n = 15) %>%
+                 mutate(go_name = factor(go_name, levels = go_name), reg = if_else(NES > 0, "up", "down")), 
+               aes(y=sign(NES)*-log10(padj), x = go_name, size = size, color = NES > 0)) +  
+    geom_point(stat="identity") + scale_size_continuous(breaks = c(25, 100, 250)) + 
+    scale_color_discrete(guide = "none", palette = c("blue", "red")) +  
+    geom_hline(yintercept = 0, linetype = "dotted", color = "lightgrey") +
+    labs(x = "", y=expression(-log["10"](P[adj])%*%sign(NES)), 
+         size = " # genes",
+         title = paste("GO", ont)) +
+    geom_hline(yintercept = c(-log10(0.05),log10(0.05)), color = "darkgrey", linetype = "dashed") +   
+    coord_flip() + facet_grid( reg ~ . , scales="free_y", space = "free_y") + theme_bw() +
+    theme(strip.background = element_blank(), strip.text.x = element_blank()) 
+  print(ps1)
+  ggsave(file.path(res_dir, paste0("GO_",ont , "enrichment_bubble_secretome.tiff")), ps1, width = 8, height= 6,
+         dpi=300, compression = 'lzw')
+}
+```
+## KEGG annotations
+
+```{r}
+up_ko <- read_fwf(file.path(base_dir, "References/all_uniprot_kofamKoala_result.txt"), 
+                  skip = 2) %>% 
+  mutate(X7 = if_else(is.na(X8), X7, paste(X7,X8))) %>%
+  select(-c(X1,X8))
+colnames(up_ko) <- c("gene_name", "KO", "thrshld",
+                     "score", "E-value",  "definition")
+up_ko <- up_ko %>% mutate(Accession = str_extract(gene_name, 
+                                                  "^.*\\|([A-Z0-9]+)\\|.*$", group = 1))
+# KO identifiers -> KEGG pathways
+ko_to_pathway <- KEGGREST::keggLink("pathway", "ko")  %>%
+  enframe(name = "ko", value = "pathway") %>%
+  filter(str_detect(pathway, "map")) %>%
+  mutate(
+    ko = str_remove(ko, "^ko:"),
+    pathway = str_remove(pathway, "^path:")) %>%
+  filter(ko %in% up_ko$KO)
+# 4. Gather pathways for each uniprot id
+#4a. Gather KO for each up
+ko_pw_list <- ko_to_pathway %>% split(.$ko) %>% map(~ pull(.x, pathway))
+up_kgs <- lapply(unique(unique(up_ko$Accession)), 
+                 function(x) up_ko$KO[up_ko$Accession == x])
+names(up_kgs) <- unique(unique(up_ko$Accession))
+up_pathways <- lapply(up_kgs, function(x) ko_to_pathway$pathway[ko_to_pathway$ko %in% x])
+up_pathways <- up_pathways[sapply(up_pathways, length) > 0]
+up_allpathways <- unique(unlist(up_pathways))
+up_pws_df <- lapply(up_pathways, paste, collapse=",") %>% unlist() 
+up_pws_df <- data.frame(Accession = names(up_pws_df), pathways = up_pws_df)
+up_gs <- list() 
+up_allpathways <- up_allpathways[ ! grepl("^map0[75]", up_allpathways)]
+up_allpathways <- up_allpathways[ ! grepl("^map0[69]", up_allpathways)]
+up_allpathways <- up_allpathways[ ! grepl("^map042[67]", up_allpathways)]
+up_allpathways <- up_allpathways[ ! grepl("^map04[96732]", up_allpathways)]
+up_gs <- list()
+for (pwy in up_allpathways){
+  up_gs[[pwy]] <- up_pws_df %>% filter(str_detect(pathways, pwy)) %>% pull(Accession)
+}
+up_gs_len <- map(up_gs, length) %>% unlist()
+up_gs <- up_gs[up_gs_len > 10]
+up_gs_pws <- names(up_gs)
+kegg_get_chunked <- function(ids, chunk_size = 50) {
+  if (! all(str_detect(ids, "^map"))){
+    ids <- paste0("map", ids)
+    }
+  chunks <- split(ids, ceiling(seq_along(ids) / chunk_size))
+  map(chunks, KEGGREST::keggList) %>% list_c()
+}
+KEGG_names_up <- kegg_get_chunked(up_gs_pws)
+
+```
+
+```{r}
+prot_kegg_fgsea <- fgsea(pathways = up_gs,
+                                stats = sort(prot_stat, decreasing = TRUE), 
+                         minSize = 15, maxSize=300) %>% 
+    mutate(kegg_name = KEGG_names_up[pathway]) %>%
+    arrange(padj) %>%
+    relocate(all_of(c("kegg_name")), .after= pathway)
+secr_kegg_fgsea <- fgsea(pathways = up_gs,
+                                stats = sort(secr_stat, decreasing = TRUE),
+                                minSize = 15, maxSize=500) %>% 
+    mutate(kegg_name = KEGG_names_up[pathway]) %>%
+    arrange(padj) %>%
+    relocate(all_of(c("kegg_name")), .after= pathway)
+```
+
+```{r}
+ps1 <- ggplot(secr_kegg_fgsea %>% arrange(padj) %>% slice_head(n = 15) %>%
+                 mutate(kegg_name = factor(kegg_name, levels = kegg_name),
+                        reg = if_else(NES > 0, "up", "down")), 
+               aes(y=sign(NES)*-log10(padj), 
+                   x = kegg_name, size = size, color = NES > 0)) +  
+    geom_point(stat="identity") + scale_size_continuous(breaks = c(25, 100, 250)) + 
+    scale_color_discrete(guide = "none", palette = c("blue", "red")) +  
+    geom_hline(yintercept = 0, linetype = "dotted", color = "lightgrey") +
+    labs(x = "", y=expression(-log["10"](P[adj])%*%sign(NES)), 
+         size = " # genes",
+         title = paste("KEGG pathways")) +
+    geom_hline(yintercept = c(-log10(0.05),log10(0.05)), color = "darkgrey", linetype = "dashed") +   
+    coord_flip() + facet_grid( reg ~ . , scales="free_y", space = "free_y") + theme_bw() +
+    theme(strip.background = element_blank(), strip.text.x = element_blank()) 
+  print(ps1)
+  ggsave(file.path(res_dir, paste0("KEGG_secretome_enrichment_bubble_secretome.tiff")), ps1, width = 8, height= 6,
+         dpi=300, compression = 'lzw')
+```
+

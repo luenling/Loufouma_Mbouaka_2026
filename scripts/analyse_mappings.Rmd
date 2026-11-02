@@ -1,0 +1,890 @@
+---
+title: "Untitled"
+author: "Lukas Endler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(patchwork)
+library(tidyverse)
+library(jsonlite)
+library("RNAseqQC")
+library("DESeq2")
+library(edgeR)
+library(reshape2)
+library("stringr")
+library(DEFormats)
+library("RColorBrewer")
+library("EnrichmentBrowser")
+library(conflicted)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+
+cmd_args <- commandArgs(trailingOnly = FALSE)
+file_arg <- grep("^--file=", cmd_args, value = TRUE)
+# if Rstudio set base dir to one level down from script path 
+if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    file_dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+    } else if (length(file_arg)) {
+    file_dir <- dirname(sub("^--file=", "", file_arg))
+    } else {
+  file_dir <- getwd()
+}
+base_dir <- normalizePath(file.path(file_dir, "/../"))
+res_dir <- file.path(base_dir, "/Results/")
+script_dir <- file.path(base_dir, "/scripts/")
+```
+
+## Preliminary analysis
+
+I need to compare the different genomes' suitability for mapping.
+The genomes are:
+
+* 1BU strain assembly
+  * in house and quite fragmented
+* AmoebaDB Neff genome
+  * quite alright, annotated
+* Two good A. castellani genomes published in biorxiv [https://www.biorxiv.org/content/10.1101/2021.10.26.465878v1.full](https://www.biorxiv.org/content/10.1101/2021.10.26.465878v1.full)
+  * strain C3 ATCC 50739, 46.1 MB, [JAJGAO](https://www.ncbi.nlm.nih.gov/nuccore/JAJGAO000000000) 
+  * strain Neff ATCC 30010, 43.83 MB, [JAJGAP](https://www.ncbi.nlm.nih.gov/nuccore/JAJGAP000000000) 
+  
+  
+```{r}
+samples <- c("1BU-a", "1BU-b", "1BU-c", "1BU-HCEC-a", "1BU-HCEC-b", "1BU-HCEC-c")
+genomes <- c("1BU", "ADB_Neff", "C3", "Neff")
+samples_stats <- list()
+for (i in samples){
+  samples_stats[[i]] <- list()
+  fastp_json <- jsonlite::read_json(paste0(res_dir, "LOGS/", i, "_fastp.json"))
+  samples_stats[[i]] <- fastp_json$summary$before_filtering[ c("total_reads",
+                                                              "read1_mean_length")]
+  samples_stats[[i]][["trimmed_reads"]] <- fastp_json$filtering_result$passed_filter_reads
+  samples_stats[[i]][["dup_rate"]] <- fastp_json$duplication$rate
+  samples_stats[[i]][["insert_peak"]] <-fastp_json$insert_size$peak
+  bt2_err <- read_lines(paste0(res_dir, "LOGS/", i, "_filtered_bt2.err.log")) 
+  samples_stats[[i]][["total_reads_to_filter"]] <- as.numeric(
+    gsub("^\\s*(\\d+)\\s+.*$",
+         "\\1", grep("were paired; of these:", bt2_err, value = TRUE)))
+  samples_stats[[i]][["reads_retained"]] <- as.numeric(
+    gsub("^\\s*(\\d+)\\s.*$",
+         "\\1", grep(" aligned concordantly 0 times$", bt2_err, value = TRUE)))
+  samples_stats[[i]][["perc_kept"]] <- samples_stats[[i]][["reads_retained"]]/samples_stats[[i]][["total_reads_to_filter"]]
+  samples_stats[[i]][["perc_human"]] <- 1 - samples_stats[[i]][["perc_kept"]]
+  # star results
+  for (j in genomes){
+    star_log <- read_lines(paste0(res_dir, "LOGS/", i,"_", j, "Log.final.out"))
+    samples_stats[[i]][paste0("uniquemapped_",j)] <- as.numeric(gsub("^.*\\s+([0-9.]+)%$",
+         "\\1", grep("Uniquely mapped reads %", star_log, value = TRUE)))
+     samples_stats[[i]][paste0("mismatch_",j)] <- as.numeric(gsub("^.*\\s+([0-9.]+)%$",
+         "\\1", grep("Mismatch rate per base, %", star_log, value = TRUE)))
+     samples_stats[[i]][paste0("multimapped_",j)] <- as.numeric(gsub("^.*\\s+([0-9.]+)%$",
+         "\\1", grep("% of reads mapped to multiple loci", star_log, value = TRUE)))
+     samples_stats[[i]][paste0("unmapped_",j)] <- sum(as.numeric(
+       gsub("^.*\\s+([0-9.]+)%$",
+         "\\1", grep("% of reads unmapped", 
+                     star_log, value = TRUE))), 
+       na.rm = TRUE)
+  } 
+  samples_stats[[i]] <- unlist(samples_stats[[i]])
+}
+samples_stats <- do.call("rbind", samples_stats) %>% as.data.frame() %>% rownames_to_column(var="sample")
+```
+
+Plot fraction of human reads
+
+```{r}
+p_hum <- ggplot(samples_stats, aes(y = perc_human, x = sample, fill = sample)) +
+  geom_bar(stat="identity", show.legend = FALSE) + theme_bw() + 
+  viridis::scale_fill_viridis(discrete = TRUE) + ylab("percent human reads")
+p_hum
+```
+
+```{r}
+sample_stats_long <- samples_stats %>% pivot_longer(cols = matches("_(1BU|C3|Neff)"), 
+                               names_to = c("type", "genome"),
+                               names_pattern = c("^([a-z]+)_(.*)$")) %>% 
+  mutate(genome = factor(genome, levels = c("ADB_Neff", "Neff", "1BU", "C3")))
+
+
+ggplot(sample_stats_long, aes(x = genome, color = sample, y = value)) +
+  geom_point(position=position_dodge(width = .25)) + 
+  facet_wrap( ~ type, , scales = "free_y" ) + theme_bw() + 
+  labs(title = "mapping of reads to different genomes") + 
+  scale_color_manual(values = wesanderson::wes_palette("GrandBudapest2",n=6, type="continuous")) +
+  theme(plot.title = element_text(hjust=0, face = "bold", size = 10)) 
+```
+
+
+## Mapping to C3 QC and setup
+
+```{r}
+samples <- c("1BU-a", "1BU-b", "1BU-c", "1BU-HCEC-a", "1BU-HCEC-b", "1BU-HCEC-c")
+sample_sheet <- data.frame(sample = samples, group = c("ctrl", "ctrl", "ctrl", "HCEC", "HCEC", "HCEC"))
+counts <- list() 
+genes <- NULL
+for( sample in samples){
+  readcounts <- read_tsv(paste0(res_dir,"/FeatureCounts/", sample, "_fc_cor.txt"),skip=1) %>% 
+    mutate(Chr = unlist(lapply(str_split(Chr, ";"), unique)), 
+                        Start = unlist(lapply(str_split(Start, ";"), min)), 
+                        End = unlist(lapply(str_split(End, ";"), max)),
+                        Strand = unlist(lapply(str_split(Strand, ";"), unique)))
+  if (is.null(genes)){
+    genes <- readcounts %>% select(Geneid, Chr, Start, End, Strand, Length)
+  }
+  if (any(readcounts$Geneid != genes$Geneid)) {
+    cat("problem with count list of sample", sample)
+    break()
+  }
+  counts[[sample]] <- readcounts[, sample]
+}
+counts <- do.call(cbind, counts)
+rownames(counts) <- genes$Geneid
+genes$totalCount <- rowSums(counts)
+```
+
+```{r}
+low_count <- rowSums(counts) <= 15
+short_genes <- genes$Length <= 100
+table(low_count)
+table(short_genes)
+```
+
+```{r}
+ggplot(genes %>% filter(totalCount < 15 & Length < 1500), aes(x=Length)) + 
+  geom_histogram(binwidth = 50, color="red", fill=NA) + 
+  geom_histogram(data=genes %>% filter(Length < 1500), alpha=0.5, color="green", fill=NA, binwidth = 50) + 
+  ggtitle("genes with less than 15 reads overall")
+```
+
+Filter out genes with less than 150bp length.
+
+Load original annotations for the genome.  
+CAZyme: carbohydrate active enzymes [Cazy database](http://www.cazy.org/)
+Protease: protease type [merops](https://www.ebi.ac.uk/merops/cgi-bin/family_index?type)
+
+
+
+```{r, warning=FALSE, message=FALSE}
+refdir <- file.path(base_dir, "References/Acastellanii_genome_annotation/C3/") 
+c3_annos <- read_tsv(paste0(refdir,"Acanthamoeba_castellanii_C3.annotations.txt"), show_col_types = FALSE) %>% select( - c(gDNA, mRNA, `CDS-transcript`, Translation))
+c3_annos <- c3_annos %>% select(which(colSums(! is.na(c3_annos)) > 0))
+c3_annos <- c3_annos %>% mutate(GO_terms = if_else(is.na(`GO Terms`),
+    NA,
+    unlist(lapply(str_extract_all(c3_annos$`GO Terms`, "(GO:[0-9]+)"),
+                  paste, collapse = ",")
+           )
+  )
+)
+  
+print(table(c3_annos$Feature))
+```
+
+
+```{r}
+#blast_koala <- read_table(paste0(refdir,"C3_blastkoala_KO.txt"), col_types = "cc", col_names = c("TranscriptID","KO"))
+eggnog <- read_tsv(paste0(refdir,"eggnog_C3/out.emapper.annotations"), skip=4, na = "-") %>% dplyr::rename(TranscriptID = `#query`) %>% mutate(KEGG_ko = gsub("ko:","", KEGG_ko))
+eggnog3 <- read_tsv(
+  paste0(refdir,"eggnog_C3/eggnog_results_stringent_Amoebozoa/Acanthamoeba_castellanii_C3_eggnog.emapper.annotations"),
+                    comment="##", na = "-") %>% 
+  dplyr::rename(TranscriptID = `#query`) %>% 
+  mutate(KEGG_ko = gsub("ko:","", KEGG_ko))
+
+kaas <- read_table(paste0(refdir,"acastellanii_C3_KAAS_KO.txt"), 
+                   col_types = "cc", col_names = c("TranscriptID","KO")) %>%
+  filter(! is.na(KO))
+table(kaas$TranscriptID %in% ( eggnog %>% filter(! is.na(KEGG_ko)) %>% pull(TranscriptID)))
+# 1295 KO missing in eggnog
+# just s
+eggnog <- eggnog %>% left_join(kaas, by="TranscriptID") %>% dplyr::rename(KO_KAAS = KO) %>% 
+  mutate(KEGG_ko = if_else(is.na(KO_KAAS), KEGG_ko, KO_KAAS))
+eggnog3 <- eggnog3 %>% left_join(kaas, by="TranscriptID") %>% dplyr::rename(KO_KAAS = KO) %>% 
+  mutate(KEGG_ko = if_else(is.na(KO_KAAS), KEGG_ko, KO_KAAS))
+```
+```{r}
+c3_annos_full <- c3_annos %>% left_join(eggnog3, by = "TranscriptID")
+genes <- genes %>% select(Geneid, Length, totalCount) %>% dplyr::rename(GeneID = Geneid) %>% left_join(c3_annos_full, by = "GeneID")
+genes <- genes %>% mutate(Name = if_else(is.na(Name), Preferred_name, Name))
+genes <- genes %>% left_join(eggnog %>% select(TranscriptID, Description), by = "TranscriptID")
+```
+
+get mapped IDs
+
+```{r}
+blasted_annos <- read_tsv(paste0(refdir,"blasted_C3_vs_acaneff_nfowl_ngrub_annos.tsv"), guess_max = 7500)
+genes <- genes %>% left_join(blasted_annos)
+```
+
+Combine GO Terms from eggnog and C3 Annos
+
+```{r}
+gens_bak <- genes
+genes <- genes %>% mutate(GO_terms_joined = case_when(is.na(GO_terms) ~ GOs,
+                                                      is.na(GOs) ~ GO_terms, 
+                                                      T ~ unlist(lapply(paste(GO_terms, GOs, sep=","), 
+                                                                 function(x) paste(
+                                                                   unique(unlist(str_split(x, ","))), 
+                                                                   sep = ",", collapse=",")))
+                                                      ))
+```
+
+
+```{r}
+library(httr)
+library(jsonlite)
+#library(xml2)
+
+
+
+get_alt_go_id <- function(goterm){
+  requestURL <- paste0("https://www.ebi.ac.uk/QuickGO/services/ontology/go/terms/",
+                     URLencode(goterm,reserved = TRUE))
+  r <- GET(requestURL, accept("application/json"))
+  stop_for_status(r)
+  httr_res <- httr::content(r)[["results"]][[1]]
+  if (httr_res$id != goterm) {
+    return(httr_res$id)
+  } else {
+    return(NA)
+  }
+}
+
+go_terms <- genes %>% filter(! is.na(GO_terms_joined)) %>% pull(GO_terms_joined) %>% str_split(",") %>% unlist() %>% unique()
+go_names <- unlist(lapply(go_terms, 
+                          function (x) {
+                            y <- AnnotationDbi::Term(x); 
+                            if(is.na(y)) { y <- setNames(NA,x)} 
+                            return(y)}))
+
+# obsolete terms will be removed
+go_update <- sapply(names(go_names[is.na(go_names)]), get_alt_go_id)
+obs_go <- names(as.list(GO.db::GOOBSOLETE))
+table(names(go_update)[is.na(go_update)] %in% obs_go)
+# all NAs are in obsolete, so just get rid of them
+for (goterm in names(go_update)){
+  if (is.na(go_update[goterm])) {
+    genes <- genes %>% mutate(GO_terms_joined = gsub(paste0(goterm,"[,]*"), "", GO_terms_joined))
+  } else{
+     genes <- genes %>% mutate(GO_terms_joined = gsub(goterm, go_update[goterm], GO_terms_joined, fixed=TRUE))
+  }
+}
+```
+
+
+Filtered tables
+
+```{r}
+#library("reshape2")
+#library("ggrepel")
+#library("conflicted")
+conflicts_prefer(edgeR::DGEList)
+source(file.path(script_dir, "/rnaseq_funcs.R"))
+genes_filt <- genes[ ! (low_count | short_genes)  , ]
+rownames(genes_filt) <- genes_filt$GeneID 
+counts_filt <- counts[ ! (low_count | short_genes)  , ]
+rownames(counts_filt) <- genes_filt$GeneID 
+rownames(sample_sheet) <- sample_sheet$sample
+ac_dge=DGEList(counts=counts_filt,genes = genes_filt, samples = sample_sheet)
+ac_dge$samples$replicates=sapply(1:length(ac_dge$samples$group), 
+                                 function(x) sum(ac_dge$samples$group[1:x] == ac_dge$samples$group[x]))
+ac_dge = calcNormFactors(ac_dge,method = "TMM")
+```
+
+
+```{r}
+plot_overall_counts(ac_dge,which_plots = "first")
+plot_overall_counts(ac_dge,which_plots = "second")
+```
+```{r}
+design_edger=model.matrix(~ group,data=ac_dge$samples)
+ac_dge_disp=estimateDisp(ac_dge,design=design_edger)
+plotBCV(ac_dge_disp)
+```
+
+
+```{r}
+keep=check_expression_threshold(ac_dge,min_cpm=1.0,min_count=10,n=3, by_group = TRUE)
+table(keep)
+```
+
+```{r}
+ac_filt=   ac_dge[keep,  , keep.lib.sizes = FALSE]
+ac_filt =  calcNormFactors(ac_filt, method = "TMM")
+design_edger=model.matrix(~ group,data=ac_filt$samples)
+```
+
+```{r}
+ac_filt_disp=estimateDisp(ac_filt,design=design_edger)
+plotBCV(ac_filt_disp)
+plot_overall_counts(ac_filt)
+plot_MA_matrix(ac_filt,averageover = "group")
+```
+
+```{r}
+pca_plot=nicePCA(ac_filt,color_by = "group",shape_by = "replicates",topvar = 5000)
+pca_plot=nicePCA(pca_plot,annos = ac_filt$samples,color_by = "group",shape_by = "replicates",xdim="PC3",ydim="PC4")
+```
+
+```{r}
+design_edger = model.matrix(~ 0 + group,data=ac_filt$samples)
+colnames(design_edger) = gsub("group","", colnames(design_edger))
+maj_contrasts = makeContrasts(hcec_ctrl = HCEC - ctrl, levels=levels(ac_filt$samples$group))
+```
+
+```{r}
+ac_filt_disp <- estimateDisp(ac_filt,design=design_edger)
+# fit glm
+ac_e1 <- glmFit(ac_filt_disp,design=design_edger)
+# fit QL glm, robust TRUE should help to protect EB dispersion shrinkage from outlying genes, not replicates
+ac_e1_QL <- glmQLFit(ac_filt_disp,design=design_edger, robust = TRUE)
+```
+
+```{r}
+plotBCV(ac_filt_disp)
+plotQLDisp(ac_e1_QL,main="4th Root of the QL Dispersion estimates, full model")
+#summary(ac_e1_QL$df.prior)
+# df.prior should be at least 5 according to Aaron Lun, otherwise use glmLRT https://support.bioconductor.org/p/84338/
+```
+
+
+```{r}
+res <- glmQLFTest(ac_e1_QL, contrast=maj_contrasts[,"hcec_ctrl"])
+#res_LR <- glmLRT(ac_e1, contrast=maj_contrasts[,"hcec"])
+res_dt <- decideTests(res)
+res_toptags <- topTags(res, n=Inf, sort.by = "none")
+res_toptags_tab <- as.data.frame(res_toptags)
+res_se <- importFromEdgeR(ac_filt_disp, res_toptags, org_name = "hsa")
+rowData(res_se)$df.total <- res$df.total
+colnames(res_dt) <- "hcec_ctrl"
+summary(res_dt)
+up_down <- table(res_dt)
+up_down <- data.frame(HCEC_ctrl = as.vector(up_down), row.names = dimnames(up_down)[[1]])
+up_down
+#LRT is less conservative
+#summary(decideTests(res_LR))
+```
+
+
+
+```{r}
+hist(ac_e1_QL$df.prior,main="QL prior degrees of freedom,full model")
+summary(ac_e1_QL$df.prior)
+# median 6.4 - just above 5 :(
+summary(ac_e1_QL$df.residual.zeros)
+```
+
+```{r, eval=TRUE}
+dir.create(paste0(res_dir,"/glimma-plots"),showWarnings = FALSE)
+glimmaMA(res, dge = ac_filt, anno=ac_filt$genes[,c("Name", "Product", "Preferred_name", "Description", "Length")], html = paste0(res_dir,"/glimma-plots/hcec_ctrl_glimma_ql_MA.html"))
+glimmaVolcano(res, dge = ac_filt, anno=ac_filt$genes[,c("Name", "Product", "Preferred_name", "Description", "Length")], html = paste0(res_dir,"/glimma-plots/hcec_ctrl_glimma_ql_volcano.html"))
+```
+
+Test with lfc threshold:
+
+```{r, eval=FALSE}
+res_treat <- glmTreat(ac_e1_QL, lfc = log2(1.2), contrast = maj_contrasts[,"hcec_ctrl"])
+res_treat_tab <- as.data.frame(topTags(res_treat, n=Inf))
+res_treat_toptags <- topTags(res_treat, n=Inf, sort.by = "none")
+res_treat_toptags$table$F <- res_toptags$table$F
+res_treat_se <- importFromEdgeR(ac_filt_disp, res_treat_toptags, org_name = "none")
+rowData(res_treat_se)$df.total <- res$df.total
+up_down <- table(decideTests(res_treat))
+up_down <- data.frame(HCEC_ctrl = as.vector(up_down), row.names = dimnames(up_down)[[1]])
+table(decideTests(res_treat))
+```
+
+```{r, eval=FALSE}
+glimmaMA(res_treat, dge = ac_filt, anno=ac_filt$genes[,c("Name", "Product", "Preferred_name", "Description")], html = paste0(res_dir,"/glimma-plots/hcec_ctrl_glimma_ql_fc_gt_1.2_MA.html"))
+glimmaVolcano(res_treat, dge = ac_filt, anno=ac_filt$genes[,c("Name", "Product", "Preferred_name", "Description")], html = paste0(res_dir,"/glimma-plots/hcec_ctrl_glimma_ql_fc_gt_1.2_volcano.html"))
+```
+
+Create plots:
+
+```{r, eval=TRUE}
+#library('EnhancedVolcano')
+library(ggpubr)
+#i="hcec_ctrl"
+alpha = 0.05
+fccutoff = 1.0
+maj_contr_names = c("HCEC_ctrl")
+names(maj_contr_names) = colnames(maj_contrasts)
+#y026 = grep("Y026",colnames(dds), value = TRUE)
+#y029 = grep("Y029",colnames(dds), value = TRUE)
+
+outdir = paste(res_dir,"/graphics/", sep = "/")
+dir.create(outdir)
+#install.packages("magick")
+library(magick)
+for( i in colnames(maj_contrasts)){
+   nsig <- res_toptags_tab %>% filter(FDR <= alpha) %>% dplyr::count() %>% unlist()
+   ac_filt_1 <- ac_filt
+   ac_filt_1$samples <- ac_filt_1$samples %>% mutate(group = factor(case_when(group == "ctrl" ~ "1BU",
+                                                                     group == "HCEC" ~ "1BU+HCEC")),
+                                                   sample = str_replace(sample, "U-H", "U+H"), 
+                                                   sample = factor(str_replace(sample, "-", " ")))
+   colnames(ac_filt_1) <- ac_filt_1$samples$sample
+   p =  create_heatmap(res_toptags_tab, ac_filt_1 , main = NULL, ngenes = min(nsig, 2500),
+                       column_names_rot = 45, show_annotation_name = FALSE)
+   png(file = paste0(outdir,"/",i,"_full_heatmap.png"), width = 800, height = 800)
+   ComplexHeatmap::draw(p, merge_legends = TRUE)
+   dev.off()
+   tiff(file = paste0(outdir,"/",i,"_full_heatmap.tiff"), width = 600, height = 600, 
+        compression = "lzw")
+   ComplexHeatmap::draw(p, merge_legends = TRUE)
+   dev.off()
+
+   if (nsig > 50){
+     p =  create_heatmap(res_toptags_tab, ac_filt_1 , main = NULL,
+                         column_names_rot = 45, show_annotation_name = FALSE, ngenes = 50)
+     png(file = paste0(outdir,"/",i,"_50sign_heatmap.png"), width = 800, height = 800)
+     ComplexHeatmap::draw(p, merge_legends = TRUE)
+     dev.off()
+     tiff(file = paste0(outdir,"/",i,"_50sign_heatmap.tiff"), width = 600, height = 600, 
+          compression = "lzw")
+     ComplexHeatmap::draw(p, merge_legends = TRUE)
+     dev.off()
+     
+   } 
+  # create Vulcano plot
+  p <- volcano.plot.cust(res_toptags_tab, adjP = "FDR", lgfc = "logFC") +
+                      theme(panel.grid.major = element_blank(),
+                            panel.grid.minor = element_blank(), 
+                            legend.position = "none")
+  ggsave( paste0(outdir,"/",i,"_volcano.png"), p, width = 8, height = 7)
+  ggsave( paste0(outdir,"/",i,"_volcano.tiff"), p, width = 8, height = 7, dpi=300, 
+          compression = 'lzw')
+  # create MA plot
+  conflicts_prefer(base::as.factor)
+  p = createMAplot(res_toptags_tab, main = "", alpha = 0.05, ntop = 100, colors = c("blue", "gray", "red"), maxoverlaps = 100) + ylab("Log2 FC") + theme_bw() + 
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          legend.position = "none")
+  ggsave( paste0(outdir,"/",i,"_ma.png"), p, width = 8, height = 7)
+  ggsave( paste0(outdir,"/",i,"_ma.tiff"), p, width = 8, height = 7, dpi=300, 
+          compression = 'lzw')
+} 
+```
+
+
+ORA:  
+* KEGGA can directly use KO as gene ids and use `species.KEGG = "ko"` - does not work if KO are not unique for geneIDs
+* goseq custom format:
+  * named vector; names geneIDs, values 0,1 for DE
+  * vector with length
+  * dataframe: geneids, gocategory or list: geneID: vector of goids
+* topGO
+  * gene-to-GOs: list: geneID: vector of GOids
+
+For GSEA use the $sign(logFC)\sqrt{F}$ for ranking as $F \approx t^2$. Can be z score transformed for better spacing and using the degrees of freedom [https://www.biostars.org/p/9610433/](https://www.biostars.org/p/9610433/)
+
+
+```{r, eval=TRUE}
+library("topGO")
+gene2go <- strsplit(res$genes$GO_terms, ",")
+names(gene2go) <- res$genes$GeneID
+gene2go <- gene2go[ ! is.na(gene2go)]
+#res_treat_de <- factor(abs(as.vector(decideTests(res_treat))))
+#names(res_treat_de) <- res_treat$genes$GeneID
+#GOdata <- new("topGOdata", ontology = "MF", allGenes = res_treat_de, annot = annFUN.gene2GO, gene2GO = gene2go)
+#resultFis <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
+#hist(score(resultFis))
+#geneData(resultFis)
+#GenTable(GOdata, classic = resultFis, topNodes = 20)
+
+##using gene scores
+res_de <- -log10(res_toptags_tab$PValue) * sign(res_tab$logFC)
+names(res_de) <- rownames(res_tab)
+sig_gene_fun <- function(allScore){ 
+  return(10^(-1*abs(allScore)) <= 0.05)
+  }
+GOdata <- new("topGOdata", ontology = "BP", allGenes = res_de, geneSelectionFun = sig_gene_fun, 
+              annot = annFUN.gene2GO, gene2GO = gene2go, nodeSize = 5)
+resultFis <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
+resultWeight01KS <- runTest(GOdata,algorithm="weight01",statistic="ks")
+
+GenTable(GOdata, classic = resultFis, ks = resultWeight01KS, topNodes = 20)
+gt <- GenTable(GOdata, fisher = resultFis, ks = resultWeight01KS, topNodes = 739) %>% 
+  mutate(fisher = as.numeric(fisher), ks = as.numeric(ks))
+gt
+```
+
+fgsea needs a list with term: vector of genes for pathways
+
+```{r}
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+go_terms <- genes %>% filter(! is.na(GO_terms_joined) & grepl("GO", GO_terms_joined)) %>% pull(GO_terms_joined) %>% str_split(",") %>% unlist() %>% unique()
+go_gmt <- lapply(go_terms, function(x) genes %>% filter( grepl(x,GO_terms_joined, fixed = TRUE)) %>% pull(GeneID) )
+names(go_gmt) <- go_terms
+go_terms_num <- sapply(go_gmt, length)
+# only keep GO terms with at least 10 genes
+go_terms_num <- go_terms_num[go_terms_num >= 10]
+go_gmt <- go_gmt[names(go_terms_num)]
+go_names <- unlist(lapply(names(go_terms_num), 
+                          function (x) {
+                            y <- AnnotationDbi::Term(x); 
+                            if(is.na(y)) { y <- setNames(NA,x)} 
+                            return(y)}))
+go_ontology <- unlist(lapply(names(go_terms_num), AnnotationDbi::Ontology))
+# do not need to remove ":" in GO terms
+go_gmt_onts <- list()
+for (onto in c("MF", "BP", "CC")){
+  go_gmt_onts[[onto]] <- go_gmt[ names(go_ontology[go_ontology == onto])] 
+  #names(go_gmt_onts[[onto]]) <- gsub(":","", names(go_gmt_onts[[onto]]))
+}
+#go_names[names(go_terms_num[go_terms_num < 5])]
+```
+
+```{r}
+library(fgsea)
+res_toptags_de <- sqrt(res_toptags$table$F) * sign(res_toptags$table$logFC)
+names(res_toptags_de) <- rownames(res_toptags$table)
+fgseaRes <- fgsea(pathways = go_gmt, stats = res_toptags_de, minSize = 15, maxSize=300) %>% 
+  mutate(go_name = go_names[pathway], go_ont = go_ontology[pathway])
+fgseaRes <- fgseaRes %>% 
+  relocate(all_of(c("go_name", "go_ont")), .after= pathway)
+fgseaRes %>% filter(pval < 0.05) %>% arrange(pval)
+```
+
+
+```{r}
+topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+#plotGseaTable(go_gmt[topPathways], res_de, fgseaRes, 
+              gseaParam=0.5)
+```
+
+Create EnrichmentBrowser results: 
+
+```{r}
+fgse_mf <- sbea_fgse(res_se,go_gmt_onts[["MF"]],alpha = 0.05, padj.method = "none", minSize = 10, maxSize = 750)
+fgse_bp <- sbea_fgse(res_se,go_gmt_onts[["BP"]],alpha = 0.05, padj.method = "none", minSize = 10, maxSize = 750)
+fgse_cc <- sbea_fgse(res_se,go_gmt_onts[["CC"]],alpha = 0.05, padj.method = "none", minSize = 10, maxSize = 750)
+```
+
+
+```{r, eval=TRUE}
+configEBrowser(key="OUTDIR.DEFAULT", value=paste(res_dir,"EBrowser2",sep="/"))
+
+write_ebrowse = function(enr_res, i, nrshowmax = 250){
+  res_tab = as.data.frame(gsRanking(enr_res, signif.only = TRUE ))
+  if(enr_res$nr.sigs == 0) {
+    res_tab = as.data.frame(gsRanking(enr_res, nr.show = 50 ))
+    res_tab = res_tab[ res_tab$PVAL < 0.05, ]
+    if(nrow(res_tab) > 0) {
+      write.table(res_tab %>% select(-LEADING.EDGE), file = paste0(res_dir,"/Enrichments/1BU_",i,"_enrichment.tsv"), sep = "\t", 
+                  quote = FALSE, row.names = FALSE)
+    }
+    return()
+  }
+  write.table(res_tab %>% select(-LEADING.EDGE), file = paste0(res_dir,"/Enrichments/1BU_",i,"_enrichment.tsv"), sep = "\t", 
+              quote = FALSE, row.names = FALSE)
+  nrshow = -1
+  # only create figures for 250 gene sets at max
+  if (enr_res$nr.sigs > nrshowmax ){
+    nrshow = nrshowmax 
+  }
+  #eaBrowse_alt(enr_res, nr.show =  nrshow, html.only = TRUE,out.dir = paste0(res_dir,"/EBrowser2/", i,"/"), report.name =  paste("1BU",i,sep ="_"))
+}
+# read only :(
+#configEBrowser(key = "EZ.COL", value = "GeneID")
+configEBrowser(key = "SYM.COL", value = "Name")
+configEBrowser(key = "GN.COL", value = "Description")
+metadata(res_se)$annotation <- "none"
+# need to correct GO terms in fgse_res$gs and fgse_mf$res.tbl$GENE.SET, lost colons
+#names(fgse_mf$gs) <- gsub("^GO", "GO:", names(fgse_mf$gs))
+#fgse_mf$res.tbl$GENE.SET <-  gsub("^GO", "GO:", fgse_mf$res.tbl$GENE.SET)
+write_ebrowse(fgse_mf, "GO_MF")
+write_ebrowse(fgse_bp, "GO_BP")
+write_ebrowse(fgse_cc, "GO_CC")
+
+#eaBrowse_alt(fgse_mf, nr.show =  250, html.only = TRUE,
+#             out.dir = paste0(res_dir,"/EBrowser2/", i,"/"), 
+#             report.name =  paste("1BU",i,sep ="_"))
+```
+
+```{r}
+# create reports
+# annos: ensemble, "entrez","symbol","gene_biotype","description","location", significant, status, rank_abs_logFC, rank_logFC, rank_padj  
+library(openxlsx)
+outdir = paste0(res_dir,"/DE_results/")
+dir.create(outdir)
+cpm_means <- data.frame(cpm(ac_dge), check.names = FALSE) %>% 
+  mutate(meanCPMctrl = apply(.[, ac_dge$samples$group == "ctrl"], 1, mean, na.rm = TRUE), 
+         meanCPMhcec = apply(.[, ac_dge$samples$group != "ctrl"], 1, mean, na.rm = TRUE)) %>% 
+  select(meanCPMctrl, meanCPMhcec) %>% rownames_to_column(var = "GeneID")
+res_tab_b <- res_toptags_tab %>% select(-c(TranscriptID, Feature, BUSCO,
+                                   `GO Terms`, seed_ortholog, evalue, score,
+                                   tax_ceiling,farthest_donor_lineage,
+                                   eggNOG_OGs, KEGG_Module, KEGG_Reaction, 
+                                   KEGG_rclass, BRITE, KO_KAAS )) %>% 
+  left_join(cpm_means) %>%
+  relocate(F, logFC, FDR, meanCPMctrl, meanCPMhcec, logCPM,  PValue, .after = Name )
+  
+wb <- createWorkbook("DEgenes")
+addWorksheet(wb, "Up and down regulation")
+rownames(up_down) = c("down", "not sig", "up")
+writeData(wb,"Up and down regulation", up_down, startCol = 1,startRow = 1, colNames = TRUE, rowNames = TRUE)
+#freezePane(wb, "Up and down regulation", firstActiveRow= 2,firstActiveCol = 2)
+negStyle <- createStyle(fontColour = "#9C0006", bgFill = "#FFC7CE")
+posStyle <- createStyle(fontColour = "#006100", bgFill = "#C6EFCE")
+ i <- colnames(maj_contrasts)
+  sheet_name = i
+  addWorksheet(wb, sheet_name)
+  writeData(wb,sheet_name, res_tab_b %>% arrange(FDR, decreasing = FALSE), startCol = 1,startRow = 1)
+  freezePane(wb, sheet_name, firstActiveRow= 2,firstActiveCol = 2)
+  conditionalFormatting(wb, sheet_name, cols = grep("^FDR$",names(res_tab_b)), rows = 2:nrow(res_tab_b), 
+                        rule = "<=0.05", style = negStyle
+  )
+    conditionalFormatting(wb, sheet_name, cols = grep("logFC",names(res_tab_b)), rows = 2:nrow(res_tab_b), 
+                        rule = '<=-1', style = negStyle
+  )
+  conditionalFormatting(wb, sheet_name, cols = grep("logFC",names(res_tab_b)), rows = 2:nrow(res_tab_b), 
+                        rule = '>=1', style = posStyle
+  )
+  sheet_name = paste("sig",i)
+  addWorksheet(wb, sheet_name)
+  sig_dt = res_tab_b %>% filter(FDR < 0.01)
+  writeData(wb,sheet_name, sig_dt %>% arrange(FDR, decreasing = FALSE), startCol = 1,startRow = 1)
+  freezePane(wb, sheet_name, firstActiveRow= 2,firstActiveCol = 2)
+    conditionalFormatting(wb, sheet_name, cols = grep("^FDR$",names(res_tab_b)), rows = 2:nrow(res_tab_b), 
+                        rule = "<=0.05", style = negStyle
+  )
+
+    conditionalFormatting(wb, sheet_name, cols = grep("logFC",names(res_tab_b)), rows = 2:nrow(res_tab_b), 
+                        rule = '<=-1', style = negStyle
+  )
+  conditionalFormatting(wb, sheet_name, cols = grep("logFC",names(res_tab_b)), rows = 2:nrow(res_tab_b), 
+                        rule = '>=1', style = posStyle
+  )
+  
+
+# write excel report 
+saveWorkbook(wb, paste0(outdir ,"DE_genes.xlsx"), overwrite = TRUE)
+
+# write tsv file
+  write.table(res_tab_b, file = paste0(outdir, "comparison_", i, "_genes.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+  write.table(res_tab_b %>% filter(FDR < 0.05), file = paste0(outdir, "comparison_", i, "significant_DE_genes.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+
+
+```
+
+```{r}
+save.image(paste0(res_dir,"/ac_de.RData"))
+```
+
+
+
+
+Try to plot the GO enrichment results with different tools
+
+```{r}
+GOdata <- list()
+gores_tab <- list()
+gores_tab[["BP"]] <- as.data.frame(fgse_bp$res.tbl)
+gores_tab[["CC"]] <- as.data.frame(fgse_cc$res.tbl)
+gores_tab[["MF"]] <- as.data.frame(fgse_mf$res.tbl)
+dir.create(paste0(res_dir, "/GO_plots"))
+for(i in c("BP", "MF", "CC")){
+  GOdata[[i]] <- new("topGOdata", ontology = i, allGenes = res_de, geneSelectionFun = sig_gene_fun, 
+              annot = annFUN.gene2GO, gene2GO = gene2go, nodeSize = 5)
+  ug <- usedGO(GOdata[[i]])
+  go_scores <- setNames(gores_tab[[i]] %>% filter(GENE.SET %in% ug) %>% 
+                          pull(PVAL), gores_tab[[i]] %>% filter(GENE.SET %in% ug) %>%
+                          pull(GENE.SET))
+  pdf(file = paste0(res_dir, "/GO_plots/go_gsea_", i, '.pdf'), width = 15, height = 10)
+  showSigOfNodes(GOdata[[i]], go_scores, firstSigNodes = sum(go_scores < 0.05), useInfo = 'all')
+  dev.off()
+}
+
+##bp_res <- as.data.frame(fgse_bp$res.tbl)
+#ug <- usedGO(GOdata)
+#go_scores <- setNames(bp_res %>% filter(GENE.SET %in% ug) %>% pull(PVAL), bp_res %>% filter(GENE.SET %in% ug) %>% pull(GENE.SET))
+#showSigOfNodes(GOdata, go_scores, firstSigNodes = 5, useInfo = 'all')
+#pdf(file = paste("go_gsea_bp", 'pdf', sep = '.'), width = 15, height = 10)
+#showSigOfNodes(GOdata, go_scores, firstSigNodes = 5, useInfo = 'all')
+#dev.off()
+
+#GOdata_MF <- new("topGOdata", ontology = "MF", allGenes = res_treat_de, geneSelectionFun = sig_gene_fun, 
+#             annot = annFUN.gene2GO, gene2GO = gene2go, nodeSize = 5)
+#GOdata_CC <- new("topGOdata", ontology = "CC", allGenes = res_treat_de, geneSelectionFun = sig_gene_fun, 
+#              annot = annFUN.gene2GO, gene2GO = gene2go, nodeSize = 5)
+```
+
+
+```{r}
+gores_tab[["BP"]] <- as.data.frame(fgse_bp$res.tbl)
+gores_tab[["CC"]] <- as.data.frame(fgse_cc$res.tbl)
+gores_tab[["MF"]] <- as.data.frame(fgse_mf$res.tbl)
+gores_tab[["BP"]]$Name <- go_names[gores_tab[["BP"]]$GENE.SET]
+gores_tab[["CC"]]$Name <- go_names[gores_tab[["CC"]]$GENE.SET]
+gores_tab[["MF"]]$Name <- go_names[gores_tab[["MF"]]$GENE.SET]
+for (ont in c("BP", "CC", "MF")){
+  p <- ggplot(gores_tab[[ont]] %>% filter(ADJ.PVAL <= 0.05) %>% arrange(-ADJ.PVAL) %>% 
+                slice_head(n=50) %>% mutate(Name = factor(Name, levels = Name)), 
+       aes(y=sign(NES)*-log10(ADJ.PVAL), x = Name, size = NR.GENES, color = NES> 0)) +  
+  geom_point(stat="identity") + scale_size_continuous(breaks = c(25, 100, 250)) + 
+  scale_color_discrete(guide = "none") +
+  labs(x = "", y=expression(-log["10"](P[adj])%*%sign(NES)), size = "genes",
+       title = paste("GO", ont)) +
+  coord_flip()
+  print(p)
+}
+
+```
+
+## Significant pathways
+
+Pathways in the different GO ontologies with an adjusted P-value below 0.01 
+
+```{r}
+gores_tab[["BP"]] <- as.data.frame(fgse_bp$res.tbl)
+gores_tab[["CC"]] <- as.data.frame(fgse_cc$res.tbl)
+gores_tab[["MF"]] <- as.data.frame(fgse_mf$res.tbl)
+gores_tab[["BP"]]$Name <- go_names[gores_tab[["BP"]]$GENE.SET]
+gores_tab[["CC"]]$Name <- go_names[gores_tab[["CC"]]$GENE.SET]
+gores_tab[["MF"]]$Name <- go_names[gores_tab[["MF"]]$GENE.SET]
+for (ont in c("BP", "CC", "MF")){
+  p1 <- ggplot(gores_tab[[ont]] %>% filter(ADJ.PVAL <= 0.01) %>% arrange(-ADJ.PVAL) %>%
+                 mutate(Name = factor(Name, levels = Name), reg = if_else(NES > 0, "up", "down")), 
+               aes(y=sign(NES)*-log10(ADJ.PVAL), x = Name, size = NR.GENES, color = NES> 0)) +  
+    geom_point(stat="identity") + scale_size_continuous(breaks = c(25, 100, 250)) + 
+    scale_color_discrete(guide = "none", palette = c("blue", "red")) +  
+    geom_hline(yintercept = 0, linetype = "dashed", color = "lightgrey") +
+    labs(x = "", y=expression(-log["10"](P[adj])%*%sign(NES)), 
+         size = " # genes",
+         title = paste("GO", ont)) +
+    coord_flip() + facet_grid( reg ~ . , scales="free_y", , space = "free_y") + theme_bw() +
+    theme(strip.background = element_blank(), strip.text.x = element_blank()) 
+  print(p1)
+  ggsave(file.path(res_dir, paste0("GO_",ont , "enrichment_bubble.tiff")), p1, width = 6, height= 6,
+         dpi=300, compression = 'lzw')
+}
+```
+
+Filter similar GO terms. Create table of GENE', 'GO' and 'ONTOLOGY' for GOSemSim godata: 
+
+```{r}
+go_table <- lapply(names(go_gmt), function(x) data.frame(GENE = go_gmt[[x]], 
+                                                         GO = rep.int(x, length(go_gmt[[x]])),
+                                                         ONTOLOGY = rep.int(go_ontology[x], length(go_gmt[[x]]))
+                                                         ))
+go_table <- bind_rows(go_table)
+go_dat_bp <- GOSemSim::godata(annoDb=go_table, ont="BP", computeIC = FALSE)
+```
+
+
+```{r}
+bp_sets <- gores_tab[["BP"]] %>% filter(ADJ.PVAL <= 0.05) %>% pull(GENE.SET)
+sim_matrix <- GOSemSim::mgoSim(bp_sets, bp_sets, semData = go_dat_bp, measure = "Wang", combine = NULL)
+
+
+filter_redundant_go <- function(fgsea_res, sim_matrix, similarity_threshold = 0.7) {
+  # 1. Filter fgsea results to only valid GO terms present in the semantic data
+  # Sort by absolute NES in descending order (highest magnitude first)
+  go_terms_loc <- fgsea_res %>%
+    filter(GENE.SET %in% rownames(sim_matrix)) %>%
+    mutate(abs_nes = abs(NES)) %>%
+    arrange(desc(abs_nes)) %>%
+    pull(GENE.SET)
+  # 2. Iteratively filter terms based on absolute NES priority
+  keep_terms <- c()
+  discard_terms <- c()
+  for (term in go_terms_loc) {
+    if (term %in% discard_terms) next
+    # Keep the current term (since it has the highest remaining absolute NES)
+    keep_terms <- c(keep_terms, term)
+    # Find all other terms highly similar to this one
+    similar_idx <- which(sim_matrix[term, ] > similarity_threshold)
+    similar_terms <- colnames(sim_matrix)[similar_idx]
+    # Mark similar terms to be discarded (excluding itself)
+    discard_terms <- unique(c(discard_terms, setdiff(similar_terms, term)))
+  }
+  # 3. Return the filtered subset of the original fgsea data frame
+  filtered_res <- fgsea_res %>%
+    filter(GENE.SET %in% keep_terms) %>%
+    arrange(desc(abs(NES)))
+  return(filtered_res)
+}
+conflicts_prefer(base::setdiff)
+gores_tab_red <- list()
+gores_tab_red[['BP']] <- filter_redundant_go(gores_tab[["BP"]], sim_matrix = sim_matrix)
+```
+
+Try to look at KEGG enrichments:
+
+```{r}
+KEGG_pwys <- res_tab$KEGG_Pathway %>% str_split(",") %>% unlist() %>% 
+  unique() %>% grep("[0-9]+", ., value = T)
+# filter inappropriate pathways 
+KEGG_pwys <- KEGG_pwys[ ! grepl("^0[75]", KEGG_pwys)]
+KEGG_pwys <- KEGG_pwys[ ! grepl("^0[69]", KEGG_pwys)]
+KEGG_pwys <- KEGG_pwys[ ! grepl("^042[67]", KEGG_pwys)]
+KEGG_gs <- list()
+for (pwy in KEGG_pwys){
+  KEGG_gs[[pwy]] <- res_tab %>% filter(str_detect(KEGG_Pathway, pwy)) %>% pull(GeneID)
+}
+KEGG_len <- lapply(KEGG_gs, length)
+KEGG_len <- KEGG_len[KEGG_len >= 10]
+KEGG_pwys <- KEGG_pwys[KEGG_pwys %in% names(KEGG_len)]
+KEGG_gs <- KEGG_gs[KEGG_pwys]
+# keggrest only retrieves up to 99 entries
+kegg_get_chunked <- function(ids, chunk_size = 50) {
+  if (! all(str_detect(ids, "^map"))){
+    ids <- paste0("map", ids)
+    }
+  chunks <- split(ids, ceiling(seq_along(ids) / chunk_size))
+  map(chunks, KEGGREST::keggList) %>% list_c()
+}
+KEGG_names <- kegg_get_chunked(KEGG_pwys)
+#KEGG_names["01130"] <- "map01130"
+```
+
+
+To filter out KEGG pathways not applicable to A.cast:
+map07xxx: Drug development
+map05xxx: Human disease,
+map04[69]xxx
+map042[67]xxx
+but keep map04[012358]
+049xxx: Endocrine system
+KEGG Gsea
+
+```{r}
+fgse_kegg <- sbea_fgse(res_se,KEGG_gs,alpha = 0.05, padj.method = "none", minSize = 20, maxSize = 750)
+df_kegg <- as.data.frame(fgse_kegg$res.tbl) %>% 
+  mutate(GENE.SET = paste0("map", GENE.SET), KEGG_name = KEGG_names[GENE.SET]) %>% arrange(ADJ.PVAL) %>%
+    relocate(all_of(c("KEGG_name")), .after= GENE.SET)
+```
+
+```{r}
+p1 <- ggplot(df_kegg %>% filter(ADJ.PVAL <= 0.05) %>% 
+               arrange(-ADJ.PVAL) %>%
+               mutate(Name = factor(KEGG_name, levels = KEGG_name), 
+                      reg = if_else(NES > 0, "up", "down")), 
+             aes(y=sign(NES)*-log10(ADJ.PVAL), 
+                 x = Name, size = NR.GENES, color = NES> 0)) + 
+  geom_point(stat="identity") + 
+  scale_size_continuous(breaks = c(25, 100, 250)) + 
+  scale_color_discrete(guide = "none", palette = c("blue", "red")) +  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "lightgrey") +
+  labs(x = "", y=expression(-log["10"](P[adj])%*%sign(NES)), 
+       size = " # genes",
+       title = "KEGG pathways") +
+  coord_flip() + facet_grid( reg ~ . , scales="free_y", , space = "free_y") + theme_bw() +
+  theme(strip.background = element_blank(), strip.text.x = element_blank()) 
+print(p1)
+ggsave(file.path(res_dir, paste0("KEGG_enrichment_bubble.tiff")), p1, width = 7, height= 6,
+       dpi=300, compression = 'lzw')
+```
+
+
+
+
+
+
+
+

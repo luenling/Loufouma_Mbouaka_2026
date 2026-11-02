@@ -1,0 +1,355 @@
+---
+title: "A. castellani RNASeq DE analysis"
+author: "Lukas Endler"
+created: "20 June, 2024"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../Results/") })
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,cache.comments=FALSE,autodep=TRUE)
+cache_most=TRUE
+cache_special=TRUE
+ERANAL = FALSE
+image.saving = FALSE
+```
+
+
+```{r libraries_helpers , results='hide', message=FALSE, warning=FALSE}
+library("limma")
+library("DT")
+library("data.table")
+#library("Glimma")
+library("EnrichmentBrowser")
+library("edgeR")
+library("DESeq2")
+library("ggplot2")
+#library(DEFormats)
+library("RColorBrewer")
+library("ggrepel")
+#library(KEGGREST)
+library("factoextra")
+library("pheatmap")
+library("corrplot")
+library("GGally")
+#library('variancePartition')
+library(ggpubr)
+#library(doParallel)
+#library(foreach)
+require(hexbin)
+require(gridExtra)
+#library(biomaRt)
+library(openxlsx)
+library(readr)
+library(tidyverse)
+#library(GSEABase)
+cmd_args <- commandArgs(trailingOnly = FALSE)
+file_arg <- grep("^--file=", cmd_args, value = TRUE)
+# if Rstudio set base dir to one level down from script path 
+if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    file_dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+    } else if (length(file_arg)) {
+    file_dir <- dirname(sub("^--file=", "", file_arg))
+    } else {
+  file_dir <- getwd()
+}
+base_dir <- normalizePath(file.path(file_dir, "/../"))
+res_dir <- file.path(base_dir, "/Results/")
+script_dir <- file.path(base_dir, "/scripts/")
+load(paste0(res_dir,"/ac_de.RData"))
+
+source(file.path(script_dir, "/rnaseq_funcs.R"))
+knitr::opts_knit$set(root.dir = res_dir)
+```
+
+# Preliminary analysis
+
+To find an appropriate genome for the analysis, the reads were mapped to 4 different genomes
+The genomes are:
+
+* 1BU strain assembly
+  * in house and quite fragmented
+* AmoebaDB Neff genome
+  * quite alright, annotated
+* Two good A. castellani genomes published in biorxiv [https://www.biorxiv.org/content/10.1101/2021.10.26.465878v1.full](https://www.biorxiv.org/content/10.1101/2021.10.26.465878v1.full)
+  * strain C3 ATCC 50739, 46.1 MB, [JAJGAO](https://www.ncbi.nlm.nih.gov/nuccore/JAJGAO000000000) 
+  * strain Neff ATCC 30010, 43.83 MB, [JAJGAP](https://www.ncbi.nlm.nih.gov/nuccore/JAJGAP000000000) 
+  
+## Fraction reads mapping to the human genome
+
+```{r}
+p_hum <- ggplot(samples_stats, aes(y = perc_human, x = sample, fill = sample)) +
+  geom_bar(stat="identity", show.legend = FALSE) + theme_bw() + 
+  viridis::scale_fill_viridis(discrete = TRUE) + ylab("fraction human reads")
+p_hum
+```
+
+## Mapping to different genomes
+
+To check which genome would work best, the reads were mapped to the four different genome (1BU, ADB_Neff, C3 and Neff) and the average nucleotide mismatch per mapped base, the fraction of uniquely and multimapping reads - that reads mapping equally well to more than one genome position - , as well as the fraction of reads not mapping to a genome (unmapped) were analysed.
+
+```{r}
+sample_stats_long <- samples_stats %>% pivot_longer(cols = matches("_(1BU|C3|Neff)"), 
+                               names_to = c("type", "genome"),
+                               names_pattern = c("^([a-z]+)_(.*)$")) %>% 
+  mutate(genome = factor(genome, levels = c("ADB_Neff", "Neff", "1BU", "C3")),
+         type = factor(type, levels = c("mismatch", "unmapped", "uniquemapped", "multimapped"))) %>%
+  mutate(genome = fct_recode(genome, `Neff (ADB)` = "ADB_Neff", `Neff (MD)` = "Neff"), 
+         type = fct_recode(type, `per base mismatch` = "mismatch", `uniquely mapped reads` = "uniquemapped",
+                           `unmapped reads` = "unmapped", `reads mapping to multiple locations` = "multimapped"))
+
+p1 <- ggplot(sample_stats_long %>% mutate(sample = str_replace(sample, "U-H", "U+H"), 
+                                    sample = str_replace(sample, "-", " ")),
+       aes(x = genome, y = value)) +
+  geom_bar(data = sample_stats_long %>% 
+             summarize(value = mean(value), .by = c(genome, type)), 
+           aes(x = genome, y = value), color = "grey", fill="lightgrey", width = 0.5, stat = "identity") +
+  geom_point(aes(color = sample), position=position_dodge(width = .35)) + ylab("percent") +
+  facet_wrap( ~ type, scales = "free_y" ) + theme_bw() + 
+  labs(color="Sample") + xlab(NULL) + ylim(0,NA) +
+  scale_color_manual(values = wesanderson::wes_palette("AsteroidCity2",n=6, type="continuous")) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust=0, face = "bold", size = 10), 
+        axis.text.x = element_text(hjust=1, angle = 45), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+ggsave("mapping_stats_to_genomes.tiff", p1, width = 6, height= 6, dpi=300, compression = 'lzw')
+p1
+```
+
+The mismatch rate is - as expected - lowest for the 1BU genome at around 0.5% mismatches, followed by the C3 genome with 1%, while the Neff genomes are more divergent at 2%. C3 shows the best mapping fractions - the highest percentage of of uniquely mapped reads and the lowest of unmapped reads - which together with the better gene annotations, make it the preferred genome for the analysis.  
+
+# Quality control and mapping and quantification of reads
+
+Raw read quality control and trimming were checked using FastP. The reads were first mapped to a human reference genome to remove HCEC contaminants using bowtie2. The resulting trimmed and filtered reads were than mapped to the C3 genome using STAR with the annotations provided via the preprint. featurecount from the Subread package (v2.0.2)  was used to quantify gene expression.
+Quality control of the mapping was performed with Picard-Tools (v2.25.4).  
+The QC results were compile using [mutiQC v.1.24](https://multiqc.info/).
+
+
+[QC results](./multiqc_report.html)
+
+
+# Overall count plots
+
+Overall `r length(low_count)` features/genes were quantified, of these `r sum(low_count)` had less than 15 reads over all samples and were removed from the start.        
+
+```{r overall_counts_1, warning=FALSE, fig.cap="unfiltered counts for all genes"}
+plot_overall_counts(ac_dge,which_plots = "first")
+```
+
+
+
+```{r overall_counts_2, warning=FALSE, fig.cap="Density of log10 unfiltered counts for all genes"}
+plot_overall_counts(ac_dge,which_plots = "second")
+```
+
+
+## Filter genes by minimum expression
+
+All features which had less than 3 samples with more than 10 reads mapping to them were filtered out. 
+
+After filtering `r sum(keep)` or `r signif(sum(keep)/length(keep)*100,digits=2)`% of the `r length(keep)` genes are kept. 
+
+## Biological coefficient of variation
+
+Biological coefficient of variation (BCV) is explained in chapt. 2.8.2 of the [EdgeR User's guide](https://bioconductor.org/packages/release/bioc/vignettes/edgeR/inst/doc/edgeRUsersGuide.pdf).   
+
+The BCV should correspond to the variation between replicates that is not just due to poisson sampling - that is additional biological and technical variation. A value of eg. 0.25 means something like that the estimated true abundance of a gene varies by 25% between replicates.
+from [Chen et al., F1000Research 2016, 5:1438](http://dx.doi.org/10.12688/f1000research.8987.2):
+*For RNA-seq studies, the NB dispersions tend to be higher for genes with very low counts. The dispersion trend tends to decrease smoothly with abundance and to asymptotic to a constant value for genes with larger counts. From our past  experience, the asymptotic value for the BCV tends to be in range from 0.05 to 0.2 for genetically identical mice or cell lines, whereas somewhat larger values (> 0.3) are observed for human subjects.*
+
+```{r bcv_plot, warning=FALSE, fig.cap="BCV plot"}
+plotBCV(ac_filt_disp)
+```
+
+## MA plot over replicates
+
+To see whether the replicates behave well over all expression values, we can compare their log2 fold change against the group average,
+This looks alright for all replicates.
+
+```{r multima_plot, warning=FALSE, fig.cap="MA plot over all samples", cache = cache_most}
+plot_MA_matrix(ac_filt,averageover = "group")
+```
+
+
+## PCA plot
+
+
+
+```{r pca_plot, warning=FALSE,message=FALSE,fig.cap="PC1&2 of the 5000 most variable genes", cache=cache_most}
+pca_plot=nicePCA(ac_filt,color_by = "group",shape_by = "replicates",topvar = 5000)
+var_expl=paste0("(",round(100*(pca_plot$sdev^2/sum(pca_plot$sdev^2)),digits=1),"%)")
+  names(var_expl)=colnames(pca_plot$x)
+  # do actual plotting
+  xdim = "PC1"
+  ydim = "PC2"
+  gg = ggplot(pca_plot$tab %>% mutate(group = case_when(group == "ctrl" ~ "1BU",
+                                                        group == "HCEC" ~ "1BU+HCEC"),
+                                      replicates = case_when(replicates == 1 ~ "a",
+                                                        replicates == 2 ~ "b",
+                                                        replicates == 3 ~ "c",)),
+              aes(!!ensym(xdim), y = !!ensym(ydim),colour=group,shape=replicates)) + 
+    geom_point(size=3) + labs(x = paste(xdim,var_expl[xdim]), y = paste(ydim,var_expl[ydim]) ) +
+    geom_hline(color="grey", linetype="dashed", yintercept = 0) + 
+    geom_vline(color="grey", linetype="dashed", xintercept=0) + theme_bw() + 
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank())
+print(gg)
+ggsave(file.path(res_dir, "pca_1BU_HCEC.tiff"), gg, width = 8, height= 6, dpi=300, compression = 'lzw')
+```
+
+```{r pca_plot2, warning=FALSE,message=FALSE,fig.cap="PC3&4 of the 5000 most variable genes", cache=cache_most}
+pca_plot=nicePCA(pca_plot,annos = ac_filt$samples,color_by = "group",shape_by = "replicates",xdim="PC3",ydim="PC4")
+```
+
+# DE Analysis Results
+
+For the differential expression analysis of control A. castellani against A. cast. grown on HCEC, EdgeR with the quasi-likelihood framework and the glmTreat function was used to find genes for which expression differed significantly by more than 20% between the two conditions.
+
+## Overall DE genes
+
+You can find the differentially expressed genes in under ``De_results`` in the Report folder ["DE_results/DE_genes.xlsx"](./DE_results/DE_genes.xlsx)
+
+```{r updown_regulation, warning=FALSE,message=FALSE, cache=cache_most}
+up_down <- table(decideTests(res_treat))
+up_down <- data.frame(HCEC_ctrl = as.vector(up_down), row.names = dimnames(up_down)[[1]])
+rownames(up_down) = c("down", "nonsig", "up")
+datatable(up_down,options = list(dom = 't'), caption = "Significantly DE genes for HCEC vs ctrl (adj P < 0.05)")
+```
+
+### MA plot
+
+![MAplot](./graphics/hcec_ctrl_ma.png)
+
+[Interactive MA plot](./glimma-plots/hcec_ctrl_glimma_ql_fc_gt_1.2_MA.html)
+
+### Volcano plot
+
+![Volcano](./graphics/hcec_ctrl_volcano.png)
+
+[Interactive Volcano](./glimma-plots/hcec_ctrl_glimma_ql_fc_gt_1.2_volcano.html)
+
+### Heatmap
+
+Full heatmap:  
+![Full Heatmap](./graphics/hcec_ctrl_full_heatmap.png)
+
+50 most sig. genes:  
+![50 most significant genes](./graphics/hcec_ctrl_50sign_heatmap.png)
+
+
+# Geneset enrichment analysis
+
+For Gene set enrichment [Gene Ontology](http://geneontology.org/) with the biological process (BP), molecular function (MF) and cellular component (CC) branches was used.  
+The gene annotations were taken from the files provided by the authors of the preprint together with GO annotations derived with Eggnog2 from the predicted amino acid sequences of the genes. 
+
+Here you can find links to html reports for each enrichment analysis (always for a specific ontology).  
+In the html reports only the 250 most significantly enriched gene sets  with an undajusted Pvalue < 0.05 are shown, but you will always have to sort them by Pvalue, as tables are unsorted by default. 
+
+I used two a Gene set enrichment analysis (GSEA - i used a fast approximate version [fGSEA](https://github.com/ctlab/fgsea)) - which looks at whether the genes in a gene set are more or less differentially expressed than expected. 
+
+All gene sets have the total number of genes in the gene set and the number of DE genes and a link to a volcano plot and two heatmaps - one with all genes and one with only the top 50 most significantly expressed ones. If you click on the total number of genes, you get a table with info on these genes and Pvalues for DE and log fold changes.
+
+For GSEA you also get an enrichment score - ES -  and a normalised enrichment score - NES - (more comparable between sets, normalized for gene set size and correlations between gene sets and expression levels), and the leading edge genes.
+
+If ES or NES are positive, the genes in the set are more up regulated, if negative more downregulated. The leading edge set are the genes that are determining the score and are often seen as the genes driving the enrichment. If you click on them you also get an enrichment plot showing you were in an overall ranking according to something like log fold change the genes in the set lie overall [see GSEA statistics](https://www.gsea-msigdb.org/gsea/doc/GSEAUserGuideTEXT.htm#_GSEA_Statistics)
+
+All enrichment results are in excel tables in the folder ["Enrichments"](./Enrichments/) (also sets not significant after adjustment for multiple testing) or the most significant 250 gene sets browsable using EnrichmentBrowser.  
+
+```{r get_enrichments, warning=FALSE,message=FALSE, cache=cache_most}
+setwd(res_dir)
+# gsets = c("GO_BP","GO_MF","GO_CC","HALLMARK","KEGG","TFs","IMMUN","REACTOME")
+gsets = c("GO_BP","GO_MF","GO_CC")
+enrichment_df = data.frame(matrix(0,ncol = length(colnames(maj_contrasts)), nrow = length(gsets) ))
+colnames(enrichment_df) = colnames(maj_contrasts)
+rownames(enrichment_df) = gsets
+enrichment_list = list()
+
+for(j in  gsets){
+  for(i in colnames(maj_contrasts)) {
+    fn = paste0("./Enrichments/1BU_",j,"_enrichment.tsv")
+    if( file.exists(fn)){
+      if( ! j %in% names(enrichment_list)){ enrichment_list[[j]] = list()}
+      enrichment_list[[j]][[i]] = setDT(read_table(fn))
+      enrichment_df[j,i] = sum(enrichment_list[[j]][[i]]$ADJ.PVAL <= 0.1)
+    } else {
+      print(paste(fn, "not found"))
+    }
+      
+  }
+}
+#knitr::kable(enrichment_df, format="html",
+#             caption = "Significant Genesets (adj P < 0.1)") %>%
+#  kableExtra::kable_styling(bootstrap_options = c("striped", "hover")) 
+datatable(t(enrichment_df),options = list(dom = 't'), caption = "Significant Genesets (adj P < 0.1)")
+```
+
+## Significant pathways
+
+Pathways in the different GO ontologies with an adjusted P-value below 0.01 
+
+```{r}
+gores_tab[["BP"]] <- as.data.frame(fgse_bp$res.tbl)
+gores_tab[["CC"]] <- as.data.frame(fgse_cc$res.tbl)
+gores_tab[["MF"]] <- as.data.frame(fgse_mf$res.tbl)
+gores_tab[["BP"]]$Name <- go_names[gores_tab[["BP"]]$GENE.SET]
+gores_tab[["CC"]]$Name <- go_names[gores_tab[["CC"]]$GENE.SET]
+gores_tab[["MF"]]$Name <- go_names[gores_tab[["MF"]]$GENE.SET]
+for (ont in c("BP", "CC", "MF")){
+  p1 <- ggplot(gores_tab[[ont]] %>% filter(ADJ.PVAL <= 0.01) %>% arrange(-ADJ.PVAL) %>%
+                 mutate(Name = factor(Name, levels = Name), reg = if_else(NES > 0, "up", "down")), 
+               aes(y=sign(NES)*-log10(ADJ.PVAL), x = Name, size = NR.GENES, color = NES> 0)) +  
+    geom_point(stat="identity") + scale_size_continuous(breaks = c(25, 100, 250)) + 
+    scale_color_discrete(guide = "none", palette = c("blue", "red")) +  
+    geom_hline(yintercept = 0, linetype = "dashed", color = "lightgrey") +
+    labs(x = "", y=expression(-log["10"](P[adj])%*%sign(NES)), 
+         size = " # genes",
+         title = paste("GO", ont)) +
+    coord_flip() + facet_grid( reg ~ . , scales="free_y", , space = "free_y") + theme_bw() +
+    theme(strip.background = element_blank(), strip.text.x = element_blank()) 
+  print(p1)
+  ggsave(file.path(res_dir, paste0("GO_",ont , "enrichment_bubble.tiff")), p1, width = 6, height= 6,
+         dpi=300, compression = 'lzw')
+}
+```
+
+
+### GO graph plots
+
+Colors (white-yellow-red) indicate significance. 
+
+```{r, echo = FALSE, warnings = FALSE, results = 'asis'}
+  for(ont in c("BP","MF","CC")){
+      fn = paste0("./GO_plots/go_gsea_",ont,".pdf")
+      if (file.exists(fn)) cat('\n[ GO-graph plot ',ont,'](',fn,')\n')
+  }
+```
+
+
+## Individual Enrichments for browsing
+
+```{r, echo = FALSE, warnings = FALSE, results = 'asis'}
+  for(gset in c("GO_BP","GO_MF","GO_CC","HALLMARK","KEGG","TFs","IMMUN","REACTOME")){
+      fn = paste0("./EBrowser2/",gset,"/1BU_",gset,".html")
+      if (file.exists(fn)) cat('\n[',gset," - ", j,'](',fn,')\n')
+  }
+```
+
+
+
+
+`r knitr::knit_exit()`
+
+
+`r knitr::knit_exit()`
+
+
+
+
+
