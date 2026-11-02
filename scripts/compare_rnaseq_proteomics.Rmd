@@ -40,7 +40,7 @@ if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable())
 }
 base_dir <- normalizePath(file.path(file_dir, "/../"))
 res_dir <- file.path(base_dir, "/Results/")
-script_dir <- file.path(base_dir, "/p_2024_acrs_scripts/")
+script_dir <- file.path(base_dir, "/scripts/")
 load(paste0(res_dir,"/ac_de.RData"))
 
 source(file.path(script_dir, "/rnaseq_funcs.R"))
@@ -50,13 +50,13 @@ knitr::opts_knit$set(root.dir = res_dir)
 ## Load in the data
 
 ```{r}
-setwd("~/Data/P_2024_ACRS_AcanthamoebaRNASeq_LE/")
-rna_data <- openxlsx::read.xlsx("Results/DE_results/DE_genes.xlsx", sheet = "hcec_ctrl")
-prot_data <- openxlsx::read.xlsx("Proteomics/261006_package/TMT_Run1_SN20PDnormAcaOnly/261006_limmaResult_IP_TMa_017_TMT_Run1_P_SN20PDnormAcaOnly.xlsx", sheet = "limma result") %>% 
+
+rna_data <- openxlsx::read.xlsx(file.path(res_dir,"DE_results/DE_genes.xlsx"), sheet = "hcec_ctrl")
+prot_data <- openxlsx::read.xlsx(file.path(base_dir,"Proteomics/261006_limmaResult_IP_TMa_017_TMT_Run1_P_SN20PDnormAcaOnly.xlsx"), sheet = "limma result") %>% 
   filter(! str_detect(Description, "Homo sapiens")) %>% mutate(FDR_P = BUco_P_vs_BU_P_FDR, 
                                                                logFC_P = BUco_P_vs_BU_P_LOG2FC)
 #prot_data <- openxlsx::read.xlsx("241018_limmaResult_IP_TMa_017_TMT_Run1_P_SN20.xlsx", sheet = "limma result") %>% filter(! str_detect(Description, "Homo sapiens"))
-secr_data <- openxlsx::read.xlsx("Proteomics/261006_package/TMT_Run1_SN20PDnormAcaOnly/261006_limmaResult_IP_TMa_017_TMT_Run1_S_SN20PDnormAcaOnly.xlsx", sheet = "limma result") %>% 
+secr_data <- openxlsx::read.xlsx("Proteomics/261006_limmaResult_IP_TMa_017_TMT_Run1_S_SN20PDnormAcaOnly.xlsx", sheet = "limma result") %>% 
   filter(! str_detect(Description, "Homo sapiens")) %>% 
   mutate(FDR_S = BUco_S_vs_BU_S_FDR,
          logFC_S = BUco_S_vs_BU_S_LOG2FC)
@@ -83,11 +83,11 @@ length(all_uniprots)
 Get the blast results for the matching of the uniprot and C3 proteins
 
 ```{r}
-c3_up <- read_tsv(file.path(base_dir, "rbh_blast/c3_vs_uniprot.tsv"), 
+c3_up <- read_tsv(file.path(base_dir, "RBH_BLAST/c3_vs_uniprot.tsv"), 
                    col_names = c("query", "subject", "pident",
                                  "length", "qlen", "slen", "evalue", "bitscore")) %>%
   mutate(qcov = length / qlen, scov = length / slen)
-up_c3 <- read_tsv(file.path(base_dir, "rbh_blast/uniprot_vs_c3.tsv"), 
+up_c3 <- read_tsv(file.path(base_dir, "RBH_BLAST/uniprot_vs_c3.tsv"), 
                    col_names = c("query", "subject", "pident",
                                  "length", "qlen", "slen", "evalue", "bitscore")) %>%
   mutate(qcov = length / qlen, scov = length / slen)
